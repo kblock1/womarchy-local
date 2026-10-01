@@ -1,3 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shital Shah <2096835+sytelus@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 21:53:57 -0700
+Subject: [PATCH 2/5] compositor: select aquamarine's wsl backend with
+ HYPRLAND_BACKEND=wsl
+
+With HYPRLAND_BACKEND=wsl, create aquamarine's "wsl" (remote viewer) backend as mandatory plus the
+headless backend if available, instead of the DRM/libinput/Wayland set. hyprctl and the system info
+report know the backend by name.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/Compositor.cpp         | 29 ++++++++++++++++++++---------
+ src/debug/HyprCtl.cpp      |  6 ++++++
+ src/helpers/SystemInfo.cpp |  2 ++
+ 3 files changed, 28 insertions(+), 9 deletions(-)
+
 diff --git a/src/Compositor.cpp b/src/Compositor.cpp
 index 1d2d8b9..5fcfad5 100644
 --- a/src/Compositor.cpp

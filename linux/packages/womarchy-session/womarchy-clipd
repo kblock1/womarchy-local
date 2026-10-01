@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """womarchy-clipd: shares the session's Wayland clipboard with Windows through omarchy.exe (text).
 
-Listens on vsock port WOMARCHY_VSOCK_PORT + 1 for omarchy.exe, which authenticates with WOMARCHY_TOKEN
-(CLIP_HELLO) and then exchanges CLIP_TEXT messages (UTF-8, LF line endings) whenever either clipboard
-changes; see protocol/wdp.h. The Wayland side uses wl-clipboard (data-control, so no focus is needed).
+Listens on vsock port WOMARCHY_VSOCK_PORT + 1 for omarchy.exe. The session token WOMARCHY_CLIP_TOKEN
+(64 hex chars) authenticates both ends: the viewer sends its first half (CLIP_HELLO), we answer with the
+second half (CLIP_WELCOME); then both sides send CLIP_TEXT (UTF-8, LF line endings) whenever their
+clipboard changes. See protocol/wdp.h. The Wayland side uses wl-clipboard (data-control, so no focus is
+needed). Clipboard entries marked as passwords (x-kde-passwordManagerHint) never leave Linux.
 Runs as the user service womarchy-clipd.service inside the graphical session.
 """
 import hmac
@@ -13,21 +15,31 @@ import socket
 import struct
 import subprocess
 import sys
+import time
 
-VERSION = 1
-CLIP_HELLO, CLIP_TEXT = 200, 201
+VERSION = 2
+CLIP_HELLO, CLIP_TEXT, CLIP_WELCOME = 200, 201, 202
 CLIP_PORT_OFFSET = 1
+PROOF_BYTES = 16
 MAX_TEXT = 16 << 20
+HELLO_TIMEOUT = 5.0
 HEADER = struct.Struct("<II")
+HELLO = struct.Struct(f"<I{PROOF_BYTES}s")
+PASSWORD_HINT = "x-kde-passwordManagerHint"
 
 
 def log(*args):
     print("womarchy-clipd:", *args, file=sys.stderr, flush=True)
 
 
-def recv_exact(sock, n):
+def recv_exact(sock, n, deadline=None):
     buf = bytearray()
     while len(buf) < n:
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ConnectionError("timed out")
+            sock.settimeout(left)
         chunk = sock.recv(n - len(buf))
         if not chunk:
             raise ConnectionError("closed")
@@ -46,23 +58,62 @@ def send_msg(sock, mtype, payload):
     sock.sendall(HEADER.pack(mtype, len(payload)) + payload)
 
 
+def authenticate(conn, token):
+    """Read exactly one CLIP_HELLO within HELLO_TIMEOUT, check its proof, answer with ours."""
+    deadline = time.monotonic() + HELLO_TIMEOUT
+    mtype, size = HEADER.unpack(recv_exact(conn, HEADER.size, deadline))
+    if mtype != CLIP_HELLO or not HELLO.size <= size <= 256:
+        return False
+    version, proof = HELLO.unpack_from(recv_exact(conn, size, deadline))
+    if version != VERSION or not hmac.compare_digest(proof, token[:PROOF_BYTES]):
+        return False
+    conn.settimeout(None)
+    send_msg(conn, CLIP_WELCOME, HELLO.pack(VERSION, token[PROOF_BYTES:]))
+    return True
+
+
+def run(cmd, data=None, capture=True):
+    """Run a wl-clipboard command; None if it failed or hung (an app holding the selection can freeze)."""
+    out = subprocess.PIPE if capture else subprocess.DEVNULL
+    try:
+        return subprocess.run(cmd, input=data, stdout=out, stderr=out, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"{cmd[0]}: {e}")
+        return None
+
+
 def wayland_text():
-    """Current clipboard text, or None if the clipboard holds no text."""
-    r = subprocess.run(["wl-paste", "--no-newline", "--type", "text"], capture_output=True, timeout=5)
-    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+    """Current clipboard text, or None (no text, or a password the user's password manager marked)."""
+    types = run(["wl-paste", "--list-types"])
+    if types is None or types.returncode != 0 or PASSWORD_HINT in types.stdout.decode("utf-8", "replace"):
+        return None
+    r = run(["wl-paste", "--no-newline", "--type", "text"])
+    return r.stdout.decode("utf-8", "replace") if r is not None and r.returncode == 0 else None
 
 
 def set_wayland_text(text):
-    # wl-copy forks a server that owns the selection until something else is copied
-    subprocess.run(["wl-copy", "--type", "text/plain;charset=utf-8"], input=text.encode("utf-8"), timeout=5)
+    # wl-copy forks a server that owns the selection until something else is copied; that server keeps
+    # any output pipes open, so capturing its output would wait for it (the timeout) on every copy
+    run(["wl-copy", "--type", "text/plain;charset=utf-8"], text.encode("utf-8"), capture=False)
 
 
 def main():
-    token = bytes.fromhex(os.environ["WOMARCHY_TOKEN"])
-    port = int(os.environ["WOMARCHY_VSOCK_PORT"]) + CLIP_PORT_OFFSET
+    try:
+        token = bytes.fromhex(os.environ.get("WOMARCHY_CLIP_TOKEN", ""))
+        port = int(os.environ["WOMARCHY_VSOCK_PORT"]) + CLIP_PORT_OFFSET
+    except (KeyError, ValueError):
+        log("WOMARCHY_CLIP_TOKEN/WOMARCHY_VSOCK_PORT missing or invalid")
+        return 1
+    if len(token) != 2 * PROOF_BYTES:
+        log("WOMARCHY_CLIP_TOKEN must be 64 hex characters")
+        return 1
 
     server = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    server.bind((socket.VMADDR_CID_ANY, port))
+    try:
+        server.bind((socket.VMADDR_CID_ANY, port))
+    except OSError as e:
+        log(f"cannot listen on vsock port {port}: {e}")
+        return 1
     server.listen(1)
     # one line per clipboard change (the command's output); the text itself is fetched with wl-paste
     watch = subprocess.Popen(["wl-paste", "--watch", "echo"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -91,12 +142,7 @@ def main():
         if server in ready:
             conn, _ = server.accept()
             try:
-                conn.settimeout(5)
-                mtype, payload = recv_msg(conn)
-                ok = (mtype == CLIP_HELLO and len(payload) >= 4 + len(token)
-                      and struct.unpack_from("<I", payload)[0] == VERSION
-                      and hmac.compare_digest(payload[4:4 + len(token)], token))
-                conn.settimeout(None)
+                ok = authenticate(conn, token)
             except (OSError, ConnectionError, struct.error):
                 ok = False
             if not ok:

@@ -3,8 +3,8 @@
 # Bump a package's revision below whenever its patches change, so installs upgrade (pkgrel <arch>.<rev>).
 set -euo pipefail
 cd "$(dirname "$0")"
-AQUAMARINE_REL=7 # 2: orphan timeout; 3-5: output resize on display changes; 6: page-aligned shm files; 7: patch series, synced wdp.h
-HYPRLAND_REL=3 # 2: output state event logging; 3: screen capture without dmabuf
+AQUAMARINE_REL=9 # 9: no MAP_POPULATE on shm buffers (startup); 8: WDP v2, review fixes; see patches/aquamarine
+HYPRLAND_REL=6 # 6: two shm swapchain buffers (startup); 5: review fixes; see patches/hyprland
 MESA_REL=1
 PY=$(command -v python3 >/dev/null && python3 -c 'print(1)' >/dev/null 2>&1 && echo python3 || echo python)
 

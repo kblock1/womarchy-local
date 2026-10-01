@@ -6,7 +6,7 @@
 
 pkgname=(hyprland)
 pkgver=0.56.2
-pkgrel=4.3
+pkgrel=4.6
 pkgdesc='a highly customizable dynamic tiling Wayland compositor'
 arch=(x86_64 aarch64)
 url="https://github.com/hyprwm/${pkgname^}"
@@ -66,9 +66,9 @@ optdepends=('hyprpm: build and install plugins'
             'xdg-desktop-portal-hyprland: xdg-desktop-portal backend for hyprland')
 provides=(wayland-compositor)
 _archive="${pkgname^}-$pkgver"
-source=(0001-render-drm-free-mode-surfaceless-egl-and-shm-outputs.patch 0002-compositor-select-the-aquamarine-wsl-backend.patch 0003-pointer-cpu-cursor-buffers-without-dmabuf.patch 0004-protocols-screen-capture-without-linux-dmabuf.patch
+source=(0001-render-DRM-free-mode-surfaceless-EGL-shm-output-buff.patch 0002-compositor-select-aquamarine-s-wsl-backend-with-HYPR.patch 0003-pointer-CPU-cursor-buffers-without-dmabuf.patch 0004-protocols-screen-capture-without-linux-dmabuf.patch 0005-input-absolute-pointer-motion-relative-to-the-backen.patch
         "$_archive.tar.gz::$url/releases/download/v$pkgver/source-v$pkgver.tar.gz")
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP'
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
   '03ad3f5ef152ff44116ffd56fcf808486211ecabf4f0ba567108ee746ba5cd2e')
 
 prepare() {
@@ -77,10 +77,11 @@ prepare() {
 	sed -i -e '/^release:/{n;s/-D/-DCMAKE_SKIP_RPATH=ON -D/}' Makefile
 	sed -i -e '/find_package.glaze/s/7...<8 //' {.,hyprpm,start}/CMakeLists.txt
 	cd "$srcdir"
-	patch -d "hyprland-source" -Np1 -i "$srcdir/0001-render-drm-free-mode-surfaceless-egl-and-shm-outputs.patch"
-	patch -d "hyprland-source" -Np1 -i "$srcdir/0002-compositor-select-the-aquamarine-wsl-backend.patch"
-	patch -d "hyprland-source" -Np1 -i "$srcdir/0003-pointer-cpu-cursor-buffers-without-dmabuf.patch"
+	patch -d "hyprland-source" -Np1 -i "$srcdir/0001-render-DRM-free-mode-surfaceless-EGL-shm-output-buff.patch"
+	patch -d "hyprland-source" -Np1 -i "$srcdir/0002-compositor-select-aquamarine-s-wsl-backend-with-HYPR.patch"
+	patch -d "hyprland-source" -Np1 -i "$srcdir/0003-pointer-CPU-cursor-buffers-without-dmabuf.patch"
 	patch -d "hyprland-source" -Np1 -i "$srcdir/0004-protocols-screen-capture-without-linux-dmabuf.patch"
+	patch -d "hyprland-source" -Np1 -i "$srcdir/0005-input-absolute-pointer-motion-relative-to-the-backen.patch"
 }
 
 build() {

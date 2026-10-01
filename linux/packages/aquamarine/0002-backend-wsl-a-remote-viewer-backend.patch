@@ -1,0 +1,1679 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shital Shah <2096835+sytelus@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 21:53:58 -0700
+Subject: [PATCH 2/2] backend: wsl, a remote-viewer backend
+
+A backend for compositors running where there is no display hardware but a viewer elsewhere shows
+the outputs (written for WSL2 with omarchy.exe, but generic): it listens on AF_VSOCK (or a unix
+socket), authenticates the viewer with a token, creates one output per viewer monitor, and sends
+frames as damage rectangles over WDP (womarchy display protocol, src/backend/wsl/wdp.h) - either by
+reference to shm files the viewer maps itself, or inline. Frames are paced by the viewer's acks;
+keyboard, pointer and cursor images travel over the same socket. Monitor changes (add, remove,
+resize) are applied live; an optional orphan timeout ends the session when no viewer returns.
+CBackend::start falls back to the backend's own allocator when there is no DRM fd.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/aquamarine/backend/Backend.hpp |    1 +
+ include/aquamarine/backend/Wsl.hpp     |  203 +++++
+ src/backend/Backend.cpp                |   17 +
+ src/backend/Wsl.cpp                    | 1146 ++++++++++++++++++++++++
+ src/backend/wsl/wdp.h                  |  225 +++++
+ 5 files changed, 1592 insertions(+)
+ create mode 100644 include/aquamarine/backend/Wsl.hpp
+ create mode 100644 src/backend/Wsl.cpp
+ create mode 100644 src/backend/wsl/wdp.h
+
+diff --git a/include/aquamarine/backend/Backend.hpp b/include/aquamarine/backend/Backend.hpp
+index bd55c7c..c64ebcf 100644
+--- a/include/aquamarine/backend/Backend.hpp
++++ b/include/aquamarine/backend/Backend.hpp
+@@ -28,6 +28,7 @@ namespace Aquamarine {
+         AQ_BACKEND_DRM,
+         AQ_BACKEND_HEADLESS,
+         AQ_BACKEND_NULL,
++        AQ_BACKEND_WSL, // remote viewer on a WSL2 host (no DRM); see backend/Wsl.hpp
+     };
+ 
+     enum eBackendGPUDriver : uint32_t {
+diff --git a/include/aquamarine/backend/Wsl.hpp b/include/aquamarine/backend/Wsl.hpp
+new file mode 100644
+index 0000000..5e72b17
+--- /dev/null
++++ b/include/aquamarine/backend/Wsl.hpp
+@@ -0,0 +1,203 @@
++#pragma once
++
++#include "./Backend.hpp"
++#include "../allocator/Swapchain.hpp"
++#include "../output/Output.hpp"
++#include "../input/Input.hpp"
++#include <hyprutils/memory/WeakPtr.hpp>
++#include <hyprutils/os/FileDescriptor.hpp>
++#include <array>
++#include <chrono>
++#include <set>
++#include <string>
++#include <vector>
++
++namespace Aquamarine {
++    class CBackend;
++    class CWslBackend;
++    class CShmAllocator;
++
++    /*
++        The "wsl" backend drives a remote viewer (omarchy.exe on the Windows host of a WSL2 VM).
++        Outputs mirror the viewer's monitors; frames are CPU (shm) buffers the renderer reads back
++        into, announced to the viewer with their damage over a socket (AF_VSOCK <-> AF_HYPERV).
++        Pixels either live in files on WSLg's section-backed shared-memory share (zero copy) or are
++        sent inline. Input and cursor images travel over the same socket. See wsl/wdp.h.
++
++        Configuration (environment): WOMARCHY_TOKEN (64 hex chars, required), WOMARCHY_VSOCK_PORT or
++        WOMARCHY_LISTEN_UNIX, WOMARCHY_MONITORS, WOMARCHY_SHM_DIR, WOMARCHY_VM_ID,
++        WOMARCHY_ORPHAN_TIMEOUT (seconds), WOMARCHY_TRACE, WOMARCHY_SOFTWARE_CURSOR.
++    */
++    class CWslOutput : public IOutput {
++      public:
++        virtual ~CWslOutput();
++        virtual bool                                                      commit();
++        virtual bool                                                      test();
++        virtual Hyprutils::Memory::CSharedPointer<IBackendImplementation> getBackend();
++        virtual void                                                      scheduleFrame(const scheduleFrameReason reason = AQ_SCHEDULE_UNKNOWN);
++        virtual bool                                                      destroy();
++        virtual std::vector<SDRMFormat>                                   getRenderFormats();
++        virtual bool                                                      pendingPageFlip();
++        virtual bool                                                      pendingIdleFrame();
++        virtual bool                                                      setCursor(Hyprutils::Memory::CSharedPointer<IBuffer> buffer, const Hyprutils::Math::Vector2D& hotspot);
++        virtual void                                                      moveCursor(const Hyprutils::Math::Vector2D& coord, bool skipSchedule = false);
++        virtual void                                                      setCursorVisible(bool visible);
++        virtual bool                                                      hasCursorPlane() const;
++        virtual Hyprutils::Math::Vector2D                                 cursorPlaneSize();
++
++        Hyprutils::Memory::CWeakPointer<CWslOutput>                       self;
++        uint32_t                                                          monitorID = 0;
++
++      private:
++        CWslOutput(const std::string& name_, uint32_t id, Hyprutils::Memory::CWeakPointer<CWslBackend> wsl_);
++
++        void                                                     onFrameDone(uint64_t doneSeq);
++        void                                                     queueFrame();
++        void                                                     updateMode(const Hyprutils::Math::Vector2D& size, uint32_t refreshmHz);
++        std::chrono::nanoseconds                                 refreshPeriod();
++
++        Hyprutils::Memory::CWeakPointer<CWslBackend>             wsl;
++        Hyprutils::Memory::CSharedPointer<std::function<void()>> framecb;
++        bool                                                     frameScheduled = false; // a frame event is queued
++        bool                                                     frameInFlight  = false; // sent, waiting for the viewer's ack
++        bool                                                     visible        = true;  // the viewer shows this output
++        bool                                                     fullDamageNext = true;  // the viewer needs every pixel
++        uint64_t                                                 seq            = 0;
++        Hyprutils::Math::Vector2D                                announcedSize;
++        std::chrono::steady_clock::time_point                    lastFrame;
++
++        // this output's hardware cursor; the backend shows one of them (see CWslBackend::updateCursor)
++        struct {
++            Hyprutils::Memory::CSharedPointer<IBuffer> buffer;
++            Hyprutils::Math::Vector2D                  hotspot;
++            bool                                       visible = true;
++        } cursor;
++
++        friend class CWslBackend;
++    };
++
++    class CWslKeyboard : public IKeyboard {
++      public:
++        virtual const std::string& getName();
++
++      private:
++        std::string name = "wsl-keyboard";
++    };
++
++    class CWslPointer : public IPointer {
++      public:
++        virtual const std::string& getName();
++
++      private:
++        std::string name = "wsl-pointer";
++    };
++
++    class CWslBackend : public IBackendImplementation {
++      public:
++        virtual ~CWslBackend();
++        virtual eBackendType                                               type();
++        virtual bool                                                       start();
++        virtual std::vector<Hyprutils::Memory::CSharedPointer<SPollFD>>    pollFDs();
++        virtual int                                                        drmFD();
++        virtual bool                                                       dispatchEvents();
++        virtual uint32_t                                                   capabilities();
++        virtual void                                                       onReady();
++        virtual std::vector<SDRMFormat>                                    getRenderFormats();
++        virtual std::vector<SDRMFormat>                                    getCursorFormats();
++        virtual bool                                                       createOutput(const std::string& name = "");
++        virtual Hyprutils::Memory::CSharedPointer<IAllocator>              preferredAllocator();
++        virtual std::vector<Hyprutils::Memory::CSharedPointer<IAllocator>> getAllocators();
++        virtual Hyprutils::Memory::CWeakPointer<IBackendImplementation>    getPrimary();
++        virtual int                                                        drmRenderNodeFD();
++
++        Hyprutils::Memory::CWeakPointer<CWslBackend>                       self;
++
++      private:
++        CWslBackend(Hyprutils::Memory::CSharedPointer<CBackend> aq_);
++
++        struct SMonitorSpec {
++            uint32_t    id = 0;
++            int32_t     x = 0, y = 0;
++            uint32_t    width = 1920, height = 1080, refreshmHz = 60000, scale1000 = 1000;
++            bool        primary = false;
++            std::string name;
++        };
++
++        // connections: a new connection stays pending until it sends a valid HELLO, so nothing that
++        // can't prove the token can disturb the authenticated viewer
++        bool                                  listenSocket();
++        void                                  acceptConnection();
++        void                                  readPending();
++        void                                  promotePending();
++        void                                  closePending(const std::string& why);
++        void                                  readClient();
++        void                                  dropClient(const std::string& why);
++        void                                  handleMessage(uint32_t type, const uint8_t* data, uint32_t size);
++        bool                                  send(uint32_t type, const void* payload, size_t size);
++        uint8_t*                              beginMessage(uint32_t type, size_t size); // payload space in txBuffer
++        bool                                  flushTx();
++        bool                                  writeAll(int fd, const uint8_t* data, size_t size);
++        bool                                  connected() const;
++
++        // outputs / frames
++        void                                  applyMonitors(std::vector<SMonitorSpec> monitors);
++        void                                  announceOutput(Hyprutils::Memory::CSharedPointer<CWslOutput> output);
++        bool                                  sendFrame(Hyprutils::Memory::CSharedPointer<CWslOutput> output, Hyprutils::Memory::CSharedPointer<IBuffer> buffer,
++                                                        const Hyprutils::Math::CRegion& damage);
++        void                                  updateCursor();
++        void                                  sendCursor(Hyprutils::Memory::CSharedPointer<CWslOutput> owner);
++        Hyprutils::Memory::CSharedPointer<CWslOutput> outputByID(uint32_t id);
++        static std::vector<SMonitorSpec>      parseMonitorsEnv(const char* env);
++        static bool                           validMonitor(const SMonitorSpec& m);
++
++        // timers: frame pacing, ack fallbacks, the orphan timeout, a pending connection's deadline
++        void                                  addTimer(std::chrono::steady_clock::time_point when, Hyprutils::Memory::CSharedPointer<std::function<void()>> what);
++        void                                  armTimerFD();
++        void                                  dispatchTimers();
++        // end the session if no viewer is authenticated within orphanTimeoutS of start or of losing one
++        void                                  armOrphanTimer();
++
++        // input
++        void                                  releaseAllInput();
++        uint32_t                              nowMs() const;
++
++        Hyprutils::Memory::CWeakPointer<CBackend>                     aq;
++        Hyprutils::Memory::CSharedPointer<CShmAllocator>              allocator;
++        std::vector<Hyprutils::Memory::CSharedPointer<CWslOutput>>    outputs;
++        std::vector<SMonitorSpec>                                     monitorSpecs; // what the outputs realise
++        Hyprutils::Memory::CSharedPointer<CWslKeyboard>               keyboard;
++        Hyprutils::Memory::CSharedPointer<CWslPointer>                pointer;
++        std::vector<SMonitorSpec>                                     initialMonitors;
++        Hyprutils::Memory::CSharedPointer<std::function<void()>>      announce;
++
++        Hyprutils::OS::CFileDescriptor                                listenFD, pendingFD, clientFD, timerFD;
++        std::vector<uint8_t>                                          pendingRx, rxBuffer, txBuffer;
++        uint64_t                                                      pendingGeneration = 0;
++        uint32_t                                                      transport         = 0;
++        std::array<uint8_t, 32>                                       token{};
++        std::string                                                   vmID, shmDir, unixPath;
++        uint32_t                                                      vsockPort = 0;
++        uint32_t                                                      orphanTimeoutS   = 0;
++        uint64_t                                                      orphanGeneration = 0;
++
++        struct STimer {
++            std::chrono::steady_clock::time_point                    when;
++            Hyprutils::Memory::CSharedPointer<std::function<void()>> what;
++        };
++        std::vector<STimer>                                           timers;
++
++        std::set<uint32_t>                                            pressedKeys, pressedButtons;
++
++        // the cursor the viewer currently shows (to send only changes)
++        struct {
++            Hyprutils::Memory::CWeakPointer<CWslOutput>       owner;
++            Hyprutils::Memory::CSharedPointer<IBuffer>        buffer;
++            Hyprutils::Math::Vector2D                         hotspot;
++            bool                                              visible = false;
++            bool                                              sent    = false;
++        } shownCursor;
++
++        friend class CBackend;
++        friend class CWslOutput;
++    };
++};
+diff --git a/src/backend/Backend.cpp b/src/backend/Backend.cpp
+index dbd7147..dbcb1b7 100644
+--- a/src/backend/Backend.cpp
++++ b/src/backend/Backend.cpp
+@@ -4,6 +4,7 @@
+ #include <aquamarine/backend/DRM.hpp>
+ #include <aquamarine/backend/Null.hpp>
+ #include <aquamarine/allocator/GBM.hpp>
++#include <aquamarine/backend/Wsl.hpp>
+ #include <hyprutils/os/FileDescriptor.hpp>
+ #include <ranges>
+ #include <sys/timerfd.h>
+@@ -40,6 +41,7 @@ static const char* backendTypeToName(eBackendType type) {
+         case AQ_BACKEND_DRM: return "drm";
+         case AQ_BACKEND_HEADLESS: return "headless";
+         case AQ_BACKEND_WAYLAND: return "wayland";
++        case AQ_BACKEND_WSL: return "wsl";
+         default: break;
+     }
+     return "invalid";
+@@ -93,6 +95,10 @@ Hyprutils::Memory::CSharedPointer<CBackend> Aquamarine::CBackend::create(const s
+             auto ref = SP<CHeadlessBackend>(new CHeadlessBackend(backend));
+             backend->implementations.emplace_back(ref);
+             ref->self = ref;
++        } else if (b.backendType == AQ_BACKEND_WSL) {
++            auto ref = SP<CWslBackend>(new CWslBackend(backend));
++            backend->implementations.emplace_back(ref);
++            ref->self = ref;
+         } else if (b.backendType == AQ_BACKEND_NULL) {
+             auto ref = SP<CNullBackend>(new CNullBackend(backend));
+             backend->implementations.emplace_back(ref);
+@@ -173,6 +179,17 @@ bool Aquamarine::CBackend::start() {
+         }
+     }
+ 
++    // no DRM device anywhere: take an implementation's own (e.g. shm) allocator
++    if (!primaryAllocator) {
++        for (auto const& b : implementations) {
++            if (auto a = b->preferredAllocator(); a) {
++                primaryAllocator = a;
++                log(AQ_LOG_DEBUG, std::format("Using the {} backend's allocator as the primary allocator", backendTypeToName(b->type())));
++                break;
++            }
++        }
++    }
++
+     if (!primaryAllocator && (implementations.empty() || implementations.at(0)->type() != AQ_BACKEND_NULL)) {
+         log(AQ_LOG_CRITICAL, "Cannot open backend: no allocator available");
+         return false;
+diff --git a/src/backend/Wsl.cpp b/src/backend/Wsl.cpp
+new file mode 100644
+index 0000000..67b2dce
+--- /dev/null
++++ b/src/backend/Wsl.cpp
+@@ -0,0 +1,1146 @@
++#include <aquamarine/backend/Wsl.hpp>
++#include <aquamarine/allocator/Shm.hpp>
++#include "wsl/wdp.h"
++#include "Shared.hpp"
++#include "FormatUtils.hpp"
++
++#include <algorithm>
++#include <cerrno>
++#include <charconv>
++#include <cmath>
++#include <csignal>
++#include <cstring>
++#include <ctime>
++#include <fcntl.h>
++#include <format>
++#include <linux/input-event-codes.h>
++#include <linux/vm_sockets.h>
++#include <optional>
++#include <poll.h>
++#include <sys/socket.h>
++#include <sys/timerfd.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++using namespace Aquamarine;
++using namespace Hyprutils::Memory;
++using namespace Hyprutils::Math;
++#define SP CSharedPointer
++#define WP CWeakPointer
++
++using Clock = std::chrono::steady_clock;
++
++// No viewer, or the output's window is hidden: keep clients ticking, slowly.
++static constexpr auto IDLE_FRAME_INTERVAL = std::chrono::seconds(1);
++// If a frame's ack hasn't arrived after this, read the socket once more: hv_sock has been seen to wake
++// a reader late (WSL 3.0.1), and this costs one timer per frame instead of a constant poll.
++static constexpr auto LATE_ACK_POLL = std::chrono::milliseconds(25);
++// A frame never acknowledged counts as presented after this, so one lost ack can't freeze an output.
++static constexpr auto ACK_TIMEOUT = std::chrono::milliseconds(250);
++// A new connection must authenticate within this.
++static constexpr auto HELLO_TIMEOUT = std::chrono::seconds(5);
++// Total time one message may take to write before the viewer is considered gone.
++static constexpr int WRITE_TIMEOUT_MS = 2000;
++
++static bool wslTrace() {
++    static const bool TRACE = envEnabled("WOMARCHY_TRACE");
++    return TRACE;
++}
++
++static double nowMsF() {
++    return std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count();
++}
++
++static std::string envOr(const char* name, const char* fallback = "") {
++    const char* v = getenv(name);
++    return v ? v : fallback;
++}
++
++static std::optional<uint32_t> parseU32(std::string_view s) {
++    uint32_t v = 0;
++    auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
++    if (ec != std::errc{} || end != s.data() + s.size())
++        return std::nullopt;
++    return v;
++}
++
++static std::optional<int32_t> parseI32(std::string_view s) {
++    int32_t v = 0;
++    auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
++    if (ec != std::errc{} || end != s.data() + s.size())
++        return std::nullopt;
++    return v;
++}
++
++// 64 hex characters -> 32 bytes
++static std::optional<std::array<uint8_t, 32>> parseToken(const std::string& hex) {
++    std::array<uint8_t, 32> out{};
++    if (hex.size() != out.size() * 2)
++        return std::nullopt;
++    for (size_t i = 0; i < out.size(); ++i) {
++        auto [end, ec] = std::from_chars(hex.data() + i * 2, hex.data() + i * 2 + 2, out[i], 16);
++        if (ec != std::errc{} || end != hex.data() + i * 2 + 2)
++            return std::nullopt;
++    }
++    return out;
++}
++
++// compare secrets without leaking where they differ
++static bool sameBytes(const uint8_t* a, const uint8_t* b, size_t n) {
++    uint8_t diff = 0;
++    for (size_t i = 0; i < n; ++i)
++        diff |= a[i] ^ b[i];
++    return diff == 0;
++}
++
++template <typename T>
++static bool readStruct(T& out, const uint8_t* data, uint32_t size) {
++    if (size < sizeof(T))
++        return false;
++    memcpy(&out, data, sizeof(T));
++    return true;
++}
++
++// ---------------------------------------------------------------- output
++
++Aquamarine::CWslOutput::CWslOutput(const std::string& name_, uint32_t id, WP<CWslBackend> wsl_) : monitorID(id), wsl(wsl_) {
++    name        = name_;
++    description = std::format("womarchy viewer monitor {}", id);
++    make        = "womarchy";
++    model       = "WSL viewer";
++}
++
++Aquamarine::CWslOutput::~CWslOutput() {
++    events.destroy.emit();
++}
++
++void Aquamarine::CWslOutput::updateMode(const Vector2D& size, uint32_t refreshmHz) {
++    modes.clear();
++    modes.emplace_back(SP<SOutputMode>(new SOutputMode{.pixelSize = size, .refreshRate = refreshmHz, .preferred = true}));
++}
++
++std::chrono::nanoseconds Aquamarine::CWslOutput::refreshPeriod() {
++    const auto& st   = state->state();
++    uint32_t    mHz  = 0;
++    if (auto mode = st.mode.lock())
++        mHz = mode->refreshRate;
++    else if (st.customMode)
++        mHz = st.customMode->refreshRate;
++    else if (!modes.empty())
++        mHz = modes.front()->refreshRate;
++    if (mHz < 1000)
++        mHz = 60000;
++    return std::chrono::nanoseconds(1000000000000LL / mHz);
++}
++
++bool Aquamarine::CWslOutput::commit() {
++    auto        snapshot = state->snapshot();
++    const auto& st       = snapshot.state();
++    const auto  BUFFER   = (st.committed & COutputState::AQ_OUTPUT_STATE_BUFFER) ? st.buffer : nullptr;
++    CRegion     damage   = st.damage;
++
++    events.commit.emit();
++    state->consume(snapshot);
++    needsFrame = false;
++
++    auto backend = wsl.lock();
++    if (BUFFER && backend && backend->connected() && backend->sendFrame(self.lock(), BUFFER, damage)) {
++        frameInFlight = true; // present + next frame once the viewer acks
++        const auto SEQ  = seq;
++        const auto NOW  = Clock::now();
++        auto       late = makeShared<std::function<void()>>([weak = self, SEQ]() {
++            if (!weak || !weak->frameInFlight || weak->seq != SEQ)
++                return;
++            if (auto b = weak->wsl.lock(); b && b->clientFD.isValid())
++                b->readClient();
++        });
++        auto lost = makeShared<std::function<void()>>([weak = self, SEQ]() {
++            if (!weak || !weak->frameInFlight || weak->seq != SEQ)
++                return;
++            if (auto b = weak->wsl.lock())
++                b->aq->log(AQ_LOG_WARNING, std::format("wsl: {} frame {} was never acknowledged; continuing", weak->name, SEQ));
++            weak->onFrameDone(SEQ);
++        });
++        backend->addTimer(NOW + std::max<std::chrono::nanoseconds>(LATE_ACK_POLL, refreshPeriod() * 3 / 2), late);
++        backend->addTimer(NOW + ACK_TIMEOUT, lost);
++        return true;
++    }
++
++    timespec now{};
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    events.present.emit(IOutput::SPresentEvent{.presented = true, .when = &now});
++    return true;
++}
++
++bool Aquamarine::CWslOutput::test() {
++    return true;
++}
++
++SP<IBackendImplementation> Aquamarine::CWslOutput::getBackend() {
++    return wsl.lock();
++}
++
++// Emit a frame event: right away if the last one was at least ~one refresh period ago (never faster than
++// the monitor), otherwise when it is due; slowly while there is no viewer or the window is hidden.
++void Aquamarine::CWslOutput::queueFrame() {
++    auto backend = wsl.lock();
++    if (!backend)
++        return;
++
++    if (!framecb) {
++        framecb = makeShared<std::function<void()>>([this, weak = self]() {
++            if (!weak)
++                return;
++            frameScheduled = false;
++            if (frameInFlight) {
++                needsFrame = true; // a frame raced ahead of the viewer; render once it acks
++                return;
++            }
++            lastFrame = Clock::now();
++            if (auto b = wsl.lock(); b && wslTrace())
++                b->aq->log(AQ_LOG_DEBUG, std::format("wsl-trace {:.2f} {} frame event", nowMsF(), name));
++            events.frame.emit();
++        });
++    }
++
++    frameScheduled = true;
++    const auto INTERVAL = backend->connected() && visible ? std::chrono::duration_cast<std::chrono::nanoseconds>(refreshPeriod() * 9 / 10) :
++                                                            std::chrono::duration_cast<std::chrono::nanoseconds>(IDLE_FRAME_INTERVAL);
++    const auto DUE      = lastFrame + INTERVAL;
++    if (Clock::now() >= DUE)
++        backend->aq->addIdleEvent(framecb);
++    else
++        backend->addTimer(DUE, framecb);
++}
++
++void Aquamarine::CWslOutput::scheduleFrame(const scheduleFrameReason reason) {
++    if (auto b = wsl.lock(); b && wslTrace())
++        b->aq->log(AQ_LOG_DEBUG,
++                   std::format("wsl-trace {:.2f} {} scheduleFrame reason {} scheduled {} inflight {}", nowMsF(), name, (uint32_t)reason, frameScheduled, frameInFlight));
++    needsFrame = true;
++
++    // with a viewer, frames are paced by its acknowledgements (display vblank)
++    if (frameScheduled || frameInFlight)
++        return;
++
++    queueFrame();
++}
++
++void Aquamarine::CWslOutput::onFrameDone(uint64_t doneSeq) {
++    if (!frameInFlight || doneSeq != seq)
++        return;
++
++    frameInFlight = false;
++    if (auto b = wsl.lock(); b && wslTrace())
++        b->aq->log(AQ_LOG_DEBUG, std::format("wsl-trace {:.2f} {} ack seq {} needsFrame {}", nowMsF(), name, doneSeq, needsFrame));
++
++    timespec now{};
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    events.present.emit(IOutput::SPresentEvent{
++        .presented = true,
++        .when      = &now,
++        .refresh   = (int)refreshPeriod().count(),
++        .flags     = AQ_OUTPUT_PRESENT_VSYNC,
++    });
++
++    if (needsFrame && !frameScheduled)
++        queueFrame();
++}
++
++bool Aquamarine::CWslOutput::destroy() {
++    auto       backend = wsl.lock();
++    const auto ID      = monitorID;
++    events.destroy.emit();
++    if (!backend)
++        return true;
++
++    if (backend->connected()) {
++        wdp_output_removed msg{.output_id = ID};
++        backend->send(WDP_OUTPUT_REMOVED, &msg, sizeof(msg));
++    }
++    std::erase_if(backend->monitorSpecs, [ID](const auto& m) { return m.id == ID; });
++    std::erase_if(backend->outputs, [ID](const auto& o) { return o->monitorID == ID; }); // may release `this`
++    backend->updateCursor();
++    return true;
++}
++
++std::vector<SDRMFormat> Aquamarine::CWslOutput::getRenderFormats() {
++    if (auto b = wsl.lock())
++        return b->getRenderFormats();
++    return {};
++}
++
++bool Aquamarine::CWslOutput::pendingPageFlip() {
++    return frameInFlight;
++}
++
++bool Aquamarine::CWslOutput::pendingIdleFrame() {
++    return frameScheduled;
++}
++
++bool Aquamarine::CWslOutput::setCursor(SP<IBuffer> buffer, const Vector2D& hotspot) {
++    cursor.buffer  = buffer;
++    cursor.hotspot = hotspot;
++    if (auto b = wsl.lock()) {
++        if (buffer) {
++            // the newest cursor wins, and is always sent: Hyprland redraws into reused buffers
++            b->shownCursor.owner = self;
++            b->shownCursor.sent  = false;
++        }
++        b->updateCursor();
++    }
++    return true;
++}
++
++void Aquamarine::CWslOutput::moveCursor(const Vector2D& coord, bool skipSchedule) {
++    // The viewer shows the host's own cursor, which already follows the mouse.
++    ;
++}
++
++void Aquamarine::CWslOutput::setCursorVisible(bool visible_) {
++    if (cursor.visible == visible_)
++        return;
++    cursor.visible = visible_;
++    if (auto b = wsl.lock())
++        b->updateCursor();
++}
++
++bool Aquamarine::CWslOutput::hasCursorPlane() const {
++    static const bool SWCURSOR = envEnabled("WOMARCHY_SOFTWARE_CURSOR");
++    return !SWCURSOR;
++}
++
++Vector2D Aquamarine::CWslOutput::cursorPlaneSize() {
++    return {-1, -1}; // any size (up to WDP_MAX_CURSOR)
++}
++
++const std::string& Aquamarine::CWslKeyboard::getName() {
++    return name;
++}
++
++const std::string& Aquamarine::CWslPointer::getName() {
++    return name;
++}
++
++// ---------------------------------------------------------------- backend
++
++Aquamarine::CWslBackend::CWslBackend(SP<CBackend> aq_) : aq(aq_) {
++    ;
++}
++
++Aquamarine::CWslBackend::~CWslBackend() {
++    if (connected()) {
++        wdp_bye bye{.code = 0};
++        send(WDP_BYE, &bye, sizeof(bye));
++    }
++    if (!unixPath.empty())
++        unlink(unixPath.c_str());
++}
++
++eBackendType Aquamarine::CWslBackend::type() {
++    return AQ_BACKEND_WSL;
++}
++
++bool Aquamarine::CWslBackend::validMonitor(const SMonitorSpec& m) {
++    return m.id != 0 && m.width >= 1 && m.width <= WDP_MAX_DIMENSION && m.height >= 1 && m.height <= WDP_MAX_DIMENSION;
++}
++
++// "id:x:y:w:h:refresh_mhz:scale1000:primary:name;..." (WOMARCHY_MONITORS, from omarchy.exe)
++std::vector<CWslBackend::SMonitorSpec> Aquamarine::CWslBackend::parseMonitorsEnv(const char* env) {
++    std::vector<SMonitorSpec> out;
++    if (!env)
++        return out;
++
++    std::string_view all = env;
++    while (!all.empty() && out.size() < WDP_MAX_MONITORS) {
++        const auto       SEMI = all.find(';');
++        std::string_view item = all.substr(0, SEMI);
++        all                   = SEMI == std::string_view::npos ? std::string_view{} : all.substr(SEMI + 1);
++
++        std::vector<std::string_view> f;
++        while (true) {
++            const auto COLON = item.find(':');
++            f.push_back(item.substr(0, COLON));
++            if (COLON == std::string_view::npos || f.size() == 9) // the name may contain ':'
++                break;
++            item = item.substr(COLON + 1);
++        }
++        if (f.size() < 8)
++            continue;
++
++        const auto ID = parseU32(f[0]), W = parseU32(f[3]), H = parseU32(f[4]), MHZ = parseU32(f[5]), SCALE = parseU32(f[6]);
++        const auto X = parseI32(f[1]), Y = parseI32(f[2]);
++        if (!ID || !X || !Y || !W || !H || !MHZ || !SCALE)
++            continue;
++        SMonitorSpec m{.id = *ID, .x = *X, .y = *Y, .width = *W, .height = *H, .refreshmHz = *MHZ, .scale1000 = *SCALE, .primary = f[7] == "1"};
++        if (f.size() > 8)
++            m.name = std::string{f[8]};
++        if (validMonitor(m))
++            out.push_back(m);
++    }
++    return out;
++}
++
++bool Aquamarine::CWslBackend::start() {
++    aq->log(AQ_LOG_DEBUG, "wsl: starting the WSL (remote viewer) backend");
++
++    const auto TOKEN = parseToken(envOr("WOMARCHY_TOKEN"));
++    if (!TOKEN) {
++        aq->log(AQ_LOG_ERROR, "wsl: WOMARCHY_TOKEN must be 64 hex characters");
++        return false;
++    }
++    token          = *TOKEN;
++    vmID           = envOr("WOMARCHY_VM_ID");
++    shmDir         = envOr("WOMARCHY_SHM_DIR");
++    unixPath       = envOr("WOMARCHY_LISTEN_UNIX");
++    vsockPort      = parseU32(envOr("WOMARCHY_VSOCK_PORT", "0")).value_or(0);
++    orphanTimeoutS = parseU32(envOr("WOMARCHY_ORPHAN_TIMEOUT", "0")).value_or(0);
++
++    initialMonitors = parseMonitorsEnv(getenv("WOMARCHY_MONITORS"));
++    if (initialMonitors.empty())
++        initialMonitors.push_back(SMonitorSpec{.id = 1, .name = "default"});
++
++    allocator = CShmAllocator::create(aq.lock(), shmDir, "womarchy");
++
++    timerFD = Hyprutils::OS::CFileDescriptor{timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK)};
++    if (!timerFD.isValid()) {
++        aq->log(AQ_LOG_ERROR, std::format("wsl: timerfd failed: {}", strerror(errno)));
++        return false;
++    }
++
++    if (!listenSocket())
++        return false;
++
++    armOrphanTimer();
++    return true;
++}
++
++void Aquamarine::CWslBackend::armOrphanTimer() {
++    const uint64_t GEN = ++orphanGeneration;
++    if (!orphanTimeoutS)
++        return;
++
++    auto check = makeShared<std::function<void()>>([this, weak = self, GEN]() {
++        if (!weak || GEN != orphanGeneration || connected())
++            return;
++        aq->log(AQ_LOG_ERROR, std::format("wsl: no viewer for {} s, ending the session", orphanTimeoutS));
++        kill(getpid(), SIGTERM);
++    });
++    addTimer(Clock::now() + std::chrono::seconds(orphanTimeoutS), check);
++}
++
++bool Aquamarine::CWslBackend::listenSocket() {
++    Hyprutils::OS::CFileDescriptor fd;
++    if (!unixPath.empty()) {
++        fd = Hyprutils::OS::CFileDescriptor{socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)};
++        sockaddr_un addr{.sun_family = AF_UNIX};
++        strncpy(addr.sun_path, unixPath.c_str(), sizeof(addr.sun_path) - 1);
++        unlink(unixPath.c_str());
++        if (!fd.isValid() || bind(fd.get(), (sockaddr*)&addr, sizeof(addr)) != 0) {
++            aq->log(AQ_LOG_ERROR, std::format("wsl: cannot bind unix socket {}: {}", unixPath, strerror(errno)));
++            return false;
++        }
++    } else if (vsockPort) {
++        fd = Hyprutils::OS::CFileDescriptor{socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)};
++        sockaddr_vm addr{.svm_family = AF_VSOCK, .svm_port = vsockPort, .svm_cid = VMADDR_CID_ANY};
++        if (!fd.isValid() || bind(fd.get(), (sockaddr*)&addr, sizeof(addr)) != 0) {
++            aq->log(AQ_LOG_ERROR, std::format("wsl: cannot bind vsock port {}: {}", vsockPort, strerror(errno)));
++            return false;
++        }
++    } else {
++        aq->log(AQ_LOG_ERROR, "wsl: set WOMARCHY_VSOCK_PORT (or WOMARCHY_LISTEN_UNIX for testing)");
++        return false;
++    }
++
++    if (listen(fd.get(), 2) != 0) {
++        aq->log(AQ_LOG_ERROR, std::format("wsl: listen failed: {}", strerror(errno)));
++        return false;
++    }
++
++    listenFD = std::move(fd);
++    aq->log(AQ_LOG_DEBUG, std::format("wsl: waiting for the viewer on {}", unixPath.empty() ? std::format("vsock port {}", vsockPort) : unixPath));
++    return true;
++}
++
++std::vector<SP<SPollFD>> Aquamarine::CWslBackend::pollFDs() {
++    // The compositor's event loop keeps the first callback it saw for an fd number, so each socket's
++    // callback dispatches on what that fd is *now* (a pending connection becomes the client).
++    std::vector<SP<SPollFD>> fds;
++    if (listenFD.isValid())
++        fds.push_back(makeShared<SPollFD>(listenFD.get(), [this]() { acceptConnection(); }));
++    if (timerFD.isValid())
++        fds.push_back(makeShared<SPollFD>(timerFD.get(), [this]() { dispatchTimers(); }));
++    for (const int FD : {pendingFD.get(), clientFD.get()}) {
++        if (FD < 0)
++            continue;
++        fds.push_back(makeShared<SPollFD>(FD, [this, FD]() {
++            if (FD == clientFD.get())
++                readClient();
++            else if (FD == pendingFD.get())
++                readPending();
++        }));
++    }
++    return fds;
++}
++
++bool Aquamarine::CWslBackend::connected() const {
++    return clientFD.isValid();
++}
++
++void Aquamarine::CWslBackend::acceptConnection() {
++    int fd = accept4(listenFD.get(), nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
++    if (fd < 0)
++        return;
++
++    if (pendingFD.isValid())
++        closePending("replaced by a newer connection");
++
++    pendingFD = Hyprutils::OS::CFileDescriptor{fd};
++    pendingRx.clear();
++    const auto GEN = ++pendingGeneration;
++    addTimer(Clock::now() + HELLO_TIMEOUT, makeShared<std::function<void()>>([this, weak = self, GEN]() {
++                 if (weak && pendingFD.isValid() && pendingGeneration == GEN)
++                     closePending("no hello in time");
++             }));
++    aq->events.pollFDsChanged.emit();
++    aq->log(AQ_LOG_DEBUG, "wsl: new connection, awaiting hello");
++}
++
++void Aquamarine::CWslBackend::closePending(const std::string& why) {
++    if (!pendingFD.isValid())
++        return;
++    aq->log(AQ_LOG_DEBUG, std::format("wsl: closing an unauthenticated connection ({})", why));
++    // keep the fd open until the event loop has dropped its source (we may be inside its callback)
++    auto closing = makeShared<Hyprutils::OS::CFileDescriptor>(std::move(pendingFD));
++    pendingFD.reset();
++    pendingRx.clear();
++    aq->addIdleEvent(makeShared<std::function<void()>>([this, weak = self, closing]() mutable {
++        if (weak)
++            aq->events.pollFDsChanged.emit();
++        closing.reset();
++    }));
++}
++
++// Before authentication only a HELLO of plausible size is read, then checked; anything else closes it.
++void Aquamarine::CWslBackend::readPending() {
++    constexpr size_t MAXHELLO = 256;
++    size_t           need     = sizeof(wdp_header);
++    if (pendingRx.size() >= sizeof(wdp_header)) {
++        wdp_header hdr;
++        memcpy(&hdr, pendingRx.data(), sizeof(hdr));
++        if (hdr.type != WDP_HELLO || hdr.size < sizeof(wdp_hello) || hdr.size > MAXHELLO) {
++            closePending("not a hello");
++            return;
++        }
++        need = sizeof(hdr) + hdr.size;
++    }
++
++    uint8_t       buf[sizeof(wdp_header) + MAXHELLO];
++    const ssize_t N = read(pendingFD.get(), buf, need - pendingRx.size());
++    if (N == 0) {
++        closePending("closed before hello");
++        return;
++    }
++    if (N < 0) {
++        if (errno != EAGAIN && errno != EINTR)
++            closePending(strerror(errno));
++        return;
++    }
++    pendingRx.insert(pendingRx.end(), buf, buf + N);
++    if (pendingRx.size() < need || need == sizeof(wdp_header)) {
++        if (pendingRx.size() == sizeof(wdp_header))
++            readPending(); // header complete: validate it and read the body
++        return;
++    }
++
++    wdp_hello hello;
++    memcpy(&hello, pendingRx.data() + sizeof(wdp_header), sizeof(hello));
++    if (hello.version != WDP_VERSION || !sameBytes(hello.proof, token.data(), WDP_PROOF_BYTES)) {
++        closePending(hello.version != WDP_VERSION ? std::format("protocol version {}, need {}", hello.version, WDP_VERSION) : "wrong token");
++        return;
++    }
++    transport = !shmDir.empty() && (hello.transports & (1u << WDP_TRANSPORT_SECTION)) ? WDP_TRANSPORT_SECTION : WDP_TRANSPORT_INLINE;
++    promotePending();
++}
++
++void Aquamarine::CWslBackend::promotePending() {
++    if (clientFD.isValid())
++        dropClient("replaced by a new viewer"); // e.g. the viewer restarted
++
++    clientFD = std::move(pendingFD);
++    pendingFD.reset();
++    pendingRx.clear();
++    rxBuffer.clear();
++    orphanGeneration++;
++
++    wdp_welcome welcome{.version = WDP_VERSION, .transport = transport};
++    strncpy(welcome.vm_id, vmID.c_str(), sizeof(welcome.vm_id) - 1);
++    memcpy(welcome.proof, token.data() + WDP_PROOF_BYTES, WDP_PROOF_BYTES);
++    if (!send(WDP_WELCOME, &welcome, sizeof(welcome)))
++        return;
++    aq->log(AQ_LOG_DEBUG, std::format("wsl: viewer authenticated, transport {}", transport == WDP_TRANSPORT_SECTION ? "section (shared memory)" : "inline"));
++    aq->events.pollFDsChanged.emit();
++
++    for (auto const& o : outputs) {
++        o->announcedSize  = {};
++        o->fullDamageNext = true;
++        o->visible        = true;
++        o->scheduleFrame(IOutput::AQ_SCHEDULE_NEW_MONITOR);
++    }
++    shownCursor.sent = false;
++    updateCursor();
++}
++
++void Aquamarine::CWslBackend::dropClient(const std::string& why) {
++    if (!clientFD.isValid())
++        return;
++
++    aq->log(AQ_LOG_DEBUG, std::format("wsl: viewer disconnected ({})", why));
++    auto closing = makeShared<Hyprutils::OS::CFileDescriptor>(std::move(clientFD));
++    clientFD.reset();
++    rxBuffer.clear();
++    armOrphanTimer();
++
++    // We may be inside a render, a cursor update or the socket's own callback (a send can fail
++    // anywhere): release input, unblock frames and close the fd from the event loop instead.
++    aq->addIdleEvent(makeShared<std::function<void()>>([this, weak = self, closing]() mutable {
++        if (weak) {
++            aq->events.pollFDsChanged.emit();
++            releaseAllInput();
++            for (auto const& o : outputs) {
++                o->frameInFlight = false;
++                if (o->needsFrame && !o->frameScheduled)
++                    o->queueFrame();
++            }
++        }
++        closing.reset();
++    }));
++}
++
++void Aquamarine::CWslBackend::readClient() {
++    bool    eof = false;
++    uint8_t chunk[65536];
++    while (rxBuffer.size() < WDP_MAX_MESSAGE + sizeof(wdp_header)) {
++        const ssize_t N = read(clientFD.get(), chunk, sizeof(chunk));
++        if (N == 0) {
++            eof = true;
++            break;
++        }
++        if (N < 0) {
++            if (errno == EAGAIN || errno == EINTR)
++                break;
++            dropClient(strerror(errno));
++            return;
++        }
++        rxBuffer.insert(rxBuffer.end(), chunk, chunk + N);
++    }
++
++    // handle what arrived before a close too (e.g. QUIT, then the viewer exits)
++    size_t off = 0;
++    while (rxBuffer.size() - off >= sizeof(wdp_header)) {
++        wdp_header hdr;
++        memcpy(&hdr, rxBuffer.data() + off, sizeof(hdr));
++        if (hdr.size > WDP_MAX_MESSAGE) {
++            dropClient("oversized message");
++            return;
++        }
++        if (rxBuffer.size() - off - sizeof(hdr) < hdr.size)
++            break;
++        handleMessage(hdr.type, rxBuffer.data() + off + sizeof(hdr), hdr.size);
++        if (!clientFD.isValid())
++            return; // dropped while handling
++        off += sizeof(hdr) + hdr.size;
++    }
++    rxBuffer.erase(rxBuffer.begin(), rxBuffer.begin() + off);
++
++    if (eof)
++        dropClient("eof");
++}
++
++void Aquamarine::CWslBackend::handleMessage(uint32_t type, const uint8_t* data, uint32_t size) {
++    switch (type) {
++        case WDP_MONITORS: {
++            wdp_monitors hdr{};
++            if (!readStruct(hdr, data, size) || hdr.count > WDP_MAX_MONITORS || size < sizeof(hdr) + (size_t)hdr.count * sizeof(wdp_monitor))
++                break;
++            std::vector<SMonitorSpec> specs;
++            for (uint32_t i = 0; i < hdr.count; ++i) {
++                wdp_monitor m{};
++                memcpy(&m, data + sizeof(hdr) + (size_t)i * sizeof(wdp_monitor), sizeof(m));
++                SMonitorSpec spec{.id         = m.id,
++                                  .x          = m.x,
++                                  .y          = m.y,
++                                  .width      = m.width,
++                                  .height     = m.height,
++                                  .refreshmHz = m.refresh_mhz,
++                                  .scale1000  = m.scale_1000,
++                                  .primary    = !!m.primary,
++                                  .name       = std::string{m.name, strnlen(m.name, sizeof(m.name))}};
++                if (validMonitor(spec) && std::ranges::none_of(specs, [&](const auto& s) { return s.id == spec.id; }))
++                    specs.push_back(spec);
++            }
++            if (!specs.empty())
++                applyMonitors(specs);
++            break;
++        }
++        case WDP_FRAME_DONE: {
++            wdp_frame_done done{};
++            if (!readStruct(done, data, size))
++                break;
++            if (auto o = outputByID(done.output_id))
++                o->onFrameDone(done.seq);
++            break;
++        }
++        case WDP_OUTPUT_VISIBLE: {
++            wdp_output_visible v{};
++            if (!readStruct(v, data, size))
++                break;
++            if (auto o = outputByID(v.output_id); o && o->visible != !!v.visible) {
++                o->visible = !!v.visible;
++                aq->log(AQ_LOG_DEBUG, std::format("wsl: {} {}", o->name, o->visible ? "shown" : "hidden (throttled)"));
++                if (o->visible && o->framecb)
++                    aq->addIdleEvent(o->framecb); // don't wait for the slow timer
++            }
++            break;
++        }
++        case WDP_REFRESH: {
++            wdp_refresh r{};
++            if (!readStruct(r, data, size))
++                break;
++            if (auto o = outputByID(r.output_id)) {
++                o->fullDamageNext = true;
++                o->scheduleFrame(IOutput::AQ_SCHEDULE_DAMAGE);
++            }
++            break;
++        }
++        case WDP_KEY: {
++            wdp_key k{};
++            if (!readStruct(k, data, size) || !keyboard)
++                break;
++            if (k.pressed) {
++                if (!pressedKeys.insert(k.key).second)
++                    break; // already down
++            } else if (!pressedKeys.erase(k.key))
++                break; // release for a key we never saw pressed
++            keyboard->events.key.emit(IKeyboard::SKeyEvent{.timeMs = nowMs(), .key = k.key, .pressed = !!k.pressed});
++            break;
++        }
++        case WDP_POINTER_ABS: {
++            wdp_pointer_abs p{};
++            if (!readStruct(p, data, size) || !pointer || !std::isfinite(p.x) || !std::isfinite(p.y))
++                break;
++            auto o = outputByID(p.output_id);
++            if (!o || o->modes.empty())
++                break;
++            const auto SIZE = o->modes.front()->pixelSize;
++            pointer->events.warp.emit(IPointer::SWarpEvent{
++                .timeMs   = nowMs(),
++                .absolute = Vector2D{std::clamp(p.x / SIZE.x, 0.0, 1.0), std::clamp(p.y / SIZE.y, 0.0, 1.0)},
++                .output   = SP<IOutput>(o),
++            });
++            break;
++        }
++        case WDP_POINTER_REL: {
++            wdp_pointer_rel p{};
++            if (!readStruct(p, data, size) || !pointer || !std::isfinite(p.dx) || !std::isfinite(p.dy))
++                break;
++            pointer->events.move.emit(IPointer::SMoveEvent{.timeMs = nowMs(), .delta = {p.dx, p.dy}, .unaccel = {p.dx, p.dy}});
++            break;
++        }
++        case WDP_POINTER_BUTTON: {
++            wdp_pointer_button b{};
++            if (!readStruct(b, data, size) || !pointer)
++                break;
++            if (b.pressed) {
++                if (!pressedButtons.insert(b.button).second)
++                    break;
++            } else if (!pressedButtons.erase(b.button))
++                break;
++            pointer->events.button.emit(IPointer::SButtonEvent{.timeMs = nowMs(), .button = b.button, .pressed = !!b.pressed});
++            break;
++        }
++        case WDP_POINTER_AXIS: {
++            wdp_pointer_axis a{};
++            if (!readStruct(a, data, size) || !pointer || !std::isfinite(a.delta))
++                break;
++            pointer->events.axis.emit(IPointer::SAxisEvent{
++                .timeMs   = nowMs(),
++                .axis     = a.axis == 1 ? IPointer::AQ_POINTER_AXIS_HORIZONTAL : IPointer::AQ_POINTER_AXIS_VERTICAL,
++                .source   = a.discrete120 ? IPointer::AQ_POINTER_AXIS_SOURCE_WHEEL : IPointer::AQ_POINTER_AXIS_SOURCE_CONTINUOUS,
++                .delta    = a.delta,
++                .discrete = (double)a.discrete120,
++            });
++            break;
++        }
++        case WDP_POINTER_FRAME:
++            if (pointer)
++                pointer->events.frame.emit();
++            break;
++        case WDP_FOCUS: {
++            wdp_focus f{};
++            if (readStruct(f, data, size) && !f.focused)
++                releaseAllInput();
++            break;
++        }
++        case WDP_QUIT:
++            aq->log(AQ_LOG_DEBUG, "wsl: viewer requested the session to end");
++            kill(getpid(), SIGTERM);
++            break;
++        default: break;
++    }
++}
++
++void Aquamarine::CWslBackend::releaseAllInput() {
++    const auto KEYS    = std::exchange(pressedKeys, {});
++    const auto BUTTONS = std::exchange(pressedButtons, {});
++    if (keyboard) {
++        for (auto const& k : KEYS)
++            keyboard->events.key.emit(IKeyboard::SKeyEvent{.timeMs = nowMs(), .key = k, .pressed = false});
++    }
++    if (pointer && !BUTTONS.empty()) {
++        for (auto const& b : BUTTONS)
++            pointer->events.button.emit(IPointer::SButtonEvent{.timeMs = nowMs(), .button = b, .pressed = false});
++        pointer->events.frame.emit();
++    }
++}
++
++uint32_t Aquamarine::CWslBackend::nowMs() const {
++    timespec ts{};
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
++}
++
++bool Aquamarine::CWslBackend::writeAll(int fd, const uint8_t* data, size_t size) {
++    const auto DEADLINE = Clock::now() + std::chrono::milliseconds(WRITE_TIMEOUT_MS);
++    while (size > 0) {
++        const ssize_t N = ::send(fd, data, size, MSG_NOSIGNAL);
++        if (N > 0) {
++            data += N;
++            size -= N;
++            continue;
++        }
++        if (N < 0 && (errno == EAGAIN || errno == EINTR)) {
++            const auto LEFT = std::chrono::duration_cast<std::chrono::milliseconds>(DEADLINE - Clock::now()).count();
++            pollfd     pfd{.fd = fd, .events = POLLOUT};
++            if (LEFT <= 0 || poll(&pfd, 1, (int)LEFT) <= 0)
++                return false;
++            continue;
++        }
++        return false;
++    }
++    return true;
++}
++
++// One write per message: hv_sock only signals the host when the ring goes from empty to non-empty,
++// so splitting a message into several small writes can leave the tail waiting for a later signal
++// (observed: ~180 ms stalls). Messages are assembled in txBuffer, then written at once.
++uint8_t* Aquamarine::CWslBackend::beginMessage(uint32_t type, size_t size) {
++    txBuffer.resize(sizeof(wdp_header) + size);
++    const wdp_header HDR{.type = type, .size = (uint32_t)size};
++    memcpy(txBuffer.data(), &HDR, sizeof(HDR));
++    return txBuffer.data() + sizeof(HDR);
++}
++
++bool Aquamarine::CWslBackend::flushTx() {
++    if (!clientFD.isValid())
++        return false;
++    const bool OK = writeAll(clientFD.get(), txBuffer.data(), txBuffer.size());
++    if (txBuffer.capacity() > (16u << 20) && txBuffer.size() < (1u << 20))
++        txBuffer.shrink_to_fit(); // after a large inline frame
++    if (!OK) {
++        dropClient("write failed");
++        return false;
++    }
++    return true;
++}
++
++bool Aquamarine::CWslBackend::send(uint32_t type, const void* payload, size_t size) {
++    if (!clientFD.isValid())
++        return false;
++    uint8_t* body = beginMessage(type, size);
++    if (size)
++        memcpy(body, payload, size);
++    return flushTx();
++}
++
++SP<CWslOutput> Aquamarine::CWslBackend::outputByID(uint32_t id) {
++    for (auto const& o : outputs) {
++        if (o->monitorID == id)
++            return o;
++    }
++    return nullptr;
++}
++
++void Aquamarine::CWslBackend::announceOutput(SP<CWslOutput> output) {
++    const auto CURRENT = output->state->state().mode.lock();
++    const auto MODE    = CURRENT ? CURRENT : (output->modes.empty() ? nullptr : output->modes.front());
++    wdp_output msg{.output_id = output->monitorID, .refresh_mhz = MODE ? MODE->refreshRate : 60000};
++    msg.width  = (uint32_t)output->announcedSize.x;
++    msg.height = (uint32_t)output->announcedSize.y;
++    strncpy(msg.name, output->name.c_str(), sizeof(msg.name) - 1);
++    send(WDP_OUTPUT, &msg, sizeof(msg));
++}
++
++bool Aquamarine::CWslBackend::sendFrame(SP<CWslOutput> output, SP<IBuffer> buffer, const CRegion& damage) {
++    auto* shm = dynamic_cast<CShmBuffer*>(buffer.get());
++    if (!shm || !shm->good())
++        return false;
++
++    const Vector2D SIZE = buffer->size;
++    if (output->announcedSize != SIZE) {
++        output->announcedSize = SIZE;
++        announceOutput(output);
++        output->fullDamageNext = true; // the viewer makes a new texture
++    }
++
++    // Empty damage (e.g. a commit only to run frame callbacks) sends no rectangles: nothing to copy.
++    CRegion region = output->fullDamageNext ? CRegion{0, 0, SIZE.x, SIZE.y} : damage.copy().intersect(CBox{{0, 0}, SIZE});
++    output->fullDamageNext = false;
++
++    std::vector<wdp_rect> rects;
++    if (region.getRects().size() > WDP_MAX_RECTS) {
++        const auto EXT = region.getExtents();
++        rects.push_back(wdp_rect{(int32_t)EXT.x, (int32_t)EXT.y, (int32_t)EXT.w, (int32_t)EXT.h});
++    } else {
++        region.forEachRect([&](const auto& r) {
++            if (r.x2 > r.x1 && r.y2 > r.y1)
++                rects.push_back(wdp_rect{r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1});
++        });
++    }
++
++    wdp_frame frame{
++        .output_id = output->monitorID,
++        .width     = (uint32_t)SIZE.x,
++        .height    = (uint32_t)SIZE.y,
++        .stride    = shm->stride(),
++        .format    = shm->format(),
++        .seq       = ++output->seq,
++        .nrects    = (uint32_t)rects.size(),
++    };
++    strncpy(frame.buffer, shm->fileName().c_str(), sizeof(frame.buffer) - 1);
++
++    if (wslTrace())
++        aq->log(AQ_LOG_DEBUG, std::format("wsl-trace {:.2f} {} send seq {} rects {}", nowMsF(), output->name, frame.seq, rects.size()));
++
++    size_t pixelBytes = 0;
++    if (transport == WDP_TRANSPORT_INLINE) {
++        for (auto const& r : rects)
++            pixelBytes += (size_t)r.w * r.h * 4;
++    }
++
++    // assemble header, frame, rects and (inline) pixels in place: one buffer, one write
++    uint8_t* p = beginMessage(WDP_FRAME, sizeof(frame) + rects.size() * sizeof(wdp_rect) + pixelBytes);
++    memcpy(p, &frame, sizeof(frame));
++    p += sizeof(frame);
++    memcpy(p, rects.data(), rects.size() * sizeof(wdp_rect));
++    p += rects.size() * sizeof(wdp_rect);
++    if (pixelBytes) {
++        for (auto const& r : rects) {
++            for (int32_t y = 0; y < r.h; ++y) {
++                memcpy(p, shm->data() + (size_t)(r.y + y) * shm->stride() + (size_t)r.x * 4, (size_t)r.w * 4);
++                p += (size_t)r.w * 4;
++            }
++        }
++    }
++    return flushTx();
++}
++
++// The viewer shows one cursor. Hyprland gives each output its own and clears it on outputs the
++// pointer left, so show the one set most recently that is still set, else any that is.
++void Aquamarine::CWslBackend::updateCursor() {
++    auto usable = [](const SP<CWslOutput>& o) { return o && o->cursor.buffer && o->cursor.visible; };
++    auto owner  = shownCursor.owner.lock();
++    if (!usable(owner)) {
++        owner = nullptr;
++        for (auto const& o : outputs) {
++            if (usable(o)) {
++                owner = o;
++                break;
++            }
++        }
++    }
++    shownCursor.owner = owner;
++
++    const bool VISIBLE = !!owner;
++    const auto BUFFER  = owner ? owner->cursor.buffer : nullptr;
++    const auto HOTSPOT = owner ? owner->cursor.hotspot : Vector2D{};
++    if (shownCursor.sent && shownCursor.visible == VISIBLE && shownCursor.buffer == BUFFER && shownCursor.hotspot == HOTSPOT)
++        return;
++    shownCursor.visible = VISIBLE;
++    shownCursor.buffer  = BUFFER;
++    shownCursor.hotspot = HOTSPOT;
++    if (connected()) {
++        sendCursor(owner);
++        shownCursor.sent = true;
++    }
++}
++
++void Aquamarine::CWslBackend::sendCursor(SP<CWslOutput> owner) {
++    wdp_cursor msg{.visible = owner ? 1u : 0u};
++    if (!owner) {
++        send(WDP_CURSOR, &msg, sizeof(msg));
++        return;
++    }
++
++    auto       buffer          = owner->cursor.buffer;
++    auto [data, fmt, len]      = buffer->beginDataPtr(0);
++    const auto W = (uint32_t)buffer->size.x, H = (uint32_t)buffer->size.y;
++    const auto IMGBYTES        = (size_t)W * H * 4;
++    if (!data || W == 0 || H == 0 || W > WDP_MAX_CURSOR || H > WDP_MAX_CURSOR || len < IMGBYTES) {
++        buffer->endDataPtr();
++        send(WDP_CURSOR, &msg, sizeof(msg)); // visible, image unchanged
++        return;
++    }
++
++    msg.has_image = 1;
++    msg.width     = W;
++    msg.height    = H;
++    msg.hot_x     = (int32_t)owner->cursor.hotspot.x;
++    msg.hot_y     = (int32_t)owner->cursor.hotspot.y;
++    uint8_t* p    = beginMessage(WDP_CURSOR, sizeof(msg) + IMGBYTES);
++    memcpy(p, &msg, sizeof(msg));
++    memcpy(p + sizeof(msg), data, IMGBYTES);
++    buffer->endDataPtr();
++    flushTx();
++}
++
++void Aquamarine::CWslBackend::applyMonitors(std::vector<SMonitorSpec> monitors) {
++    // remove outputs whose monitor vanished (destroy() tells the viewer)
++    std::vector<SP<CWslOutput>> gone;
++    for (auto const& o : outputs) {
++        if (std::ranges::none_of(monitors, [&](const auto& m) { return m.id == o->monitorID; }))
++            gone.push_back(o);
++    }
++    for (auto const& o : gone)
++        o->destroy();
++
++    monitorSpecs = monitors;
++    for (auto const& m : monitors) {
++        const Vector2D SIZE{(double)m.width, (double)m.height};
++        const double   SCALE  = std::clamp(m.scale1000, 250u, 8000u) / 1000.0;
++        const uint32_t MHZ    = std::clamp(m.refreshmHz, 1000u, 1000000u);
++        const Vector2D PHYSMM = SIZE / (96.0 * SCALE) * 25.4; // the size Windows' DPI implies
++
++        if (auto existing = outputByID(m.id)) {
++            existing->physicalSize = PHYSMM;
++            if (existing->modes.empty() || existing->modes.front()->pixelSize != SIZE || existing->modes.front()->refreshRate != MHZ) {
++                existing->updateMode(SIZE, MHZ);
++                aq->log(AQ_LOG_DEBUG, std::format("wsl: output {} is now {}x{}@{}mHz", existing->name, m.width, m.height, MHZ));
++                // Hyprland treats non-DRM outputs like user-created ones: a sized state event makes it
++                // re-apply the monitor rule at that resolution
++                existing->events.state.emit(IOutput::SStateEvent{.size = SIZE});
++            }
++            continue;
++        }
++
++        auto output = SP<CWslOutput>(new CWslOutput(std::format("WSL-{}", m.id), m.id, self));
++        output->self = output;
++        output->updateMode(SIZE, MHZ);
++        output->physicalSize = PHYSMM;
++        output->swapchain    = CSwapchain::create(allocator, self.lock());
++        outputs.emplace_back(output);
++        aq->log(AQ_LOG_DEBUG, std::format("wsl: new output {} ({}x{}@{}mHz, scale {})", output->name, m.width, m.height, MHZ, SCALE));
++        aq->events.newOutput.emit(SP<IOutput>(output));
++        output->scheduleFrame(IOutput::AQ_SCHEDULE_NEW_MONITOR);
++    }
++}
++
++void Aquamarine::CWslBackend::addTimer(Clock::time_point when, SP<std::function<void()>> what) {
++    timers.push_back(STimer{.when = when, .what = what});
++    armTimerFD();
++}
++
++void Aquamarine::CWslBackend::armTimerFD() {
++    itimerspec ts{}; // all zero disarms
++    if (!timers.empty()) {
++        const auto SOONEST = std::ranges::min_element(timers, {}, &STimer::when)->when;
++        const auto NS      = std::chrono::duration_cast<std::chrono::nanoseconds>(SOONEST.time_since_epoch()).count();
++        ts.it_value        = {.tv_sec = NS / 1000000000LL, .tv_nsec = NS % 1000000000LL};
++        if (ts.it_value.tv_sec == 0 && ts.it_value.tv_nsec == 0)
++            ts.it_value.tv_nsec = 1;
++    }
++    timerfd_settime(timerFD.get(), TFD_TIMER_ABSTIME, &ts, nullptr);
++}
++
++void Aquamarine::CWslBackend::dispatchTimers() {
++    uint64_t expirations = 0;
++    (void)!read(timerFD.get(), &expirations, sizeof(expirations));
++
++    const auto          NOW = Clock::now();
++    std::vector<STimer> due;
++    std::erase_if(timers, [&](const auto& t) {
++        if (t.when > NOW)
++            return false;
++        due.push_back(t);
++        return true;
++    });
++
++    for (auto const& t : due) {
++        if (t.what && *t.what)
++            (*t.what)();
++    }
++    armTimerFD();
++}
++
++int Aquamarine::CWslBackend::drmFD() {
++    return -1;
++}
++
++int Aquamarine::CWslBackend::drmRenderNodeFD() {
++    return -1;
++}
++
++bool Aquamarine::CWslBackend::dispatchEvents() {
++    return true;
++}
++
++uint32_t Aquamarine::CWslBackend::capabilities() {
++    return AQ_BACKEND_CAPABILITY_POINTER;
++}
++
++void Aquamarine::CWslBackend::onReady() {
++    // The compositor finishes initialising after CBackend::start() returns; announce devices and
++    // outputs from the event loop (like the Wayland backend does), not from inside start().
++    announce = makeShared<std::function<void()>>([this, weak = self]() {
++        if (!weak)
++            return;
++        keyboard = makeShared<CWslKeyboard>();
++        pointer  = makeShared<CWslPointer>();
++        aq->events.newKeyboard.emit(SP<IKeyboard>(keyboard));
++        aq->events.newPointer.emit(SP<IPointer>(pointer));
++        applyMonitors(initialMonitors);
++    });
++    aq->addIdleEvent(announce);
++}
++
++std::vector<SDRMFormat> Aquamarine::CWslBackend::getRenderFormats() {
++    return {SDRMFormat{.drmFormat = DRM_FORMAT_XRGB8888, .modifiers = {DRM_FORMAT_MOD_LINEAR}},
++            SDRMFormat{.drmFormat = DRM_FORMAT_ARGB8888, .modifiers = {DRM_FORMAT_MOD_LINEAR}}};
++}
++
++std::vector<SDRMFormat> Aquamarine::CWslBackend::getCursorFormats() {
++    return {SDRMFormat{.drmFormat = DRM_FORMAT_ARGB8888, .modifiers = {DRM_FORMAT_MOD_LINEAR}}};
++}
++
++bool Aquamarine::CWslBackend::createOutput(const std::string& name) {
++    // outputs follow the viewer's monitors; allow a manual extra one for testing (hyprctl output create)
++    uint32_t id = 1;
++    while (outputByID(id))
++        ++id;
++    auto specs = monitorSpecs;
++    specs.push_back(SMonitorSpec{.id = id, .name = name});
++    applyMonitors(specs);
++    return true;
++}
++
++SP<IAllocator> Aquamarine::CWslBackend::preferredAllocator() {
++    return allocator;
++}
++
++std::vector<SP<IAllocator>> Aquamarine::CWslBackend::getAllocators() {
++    return {allocator};
++}
++
++WP<IBackendImplementation> Aquamarine::CWslBackend::getPrimary() {
++    return {};
++}
+diff --git a/src/backend/wsl/wdp.h b/src/backend/wsl/wdp.h
+new file mode 100644
+index 0000000..a31e18a
+--- /dev/null
++++ b/src/backend/wsl/wdp.h
+@@ -0,0 +1,225 @@
++/*
++ * WDP - womarchy display protocol, version 2.
++ *
++ * Carries frames, cursor, outputs and input between a compositor's "wsl" backend (aquamarine, inside
++ * the WSL2 VM) and the Windows viewer (omarchy.exe) over a stream socket (AF_VSOCK in Linux <->
++ * AF_HYPERV on Windows; AF_UNIX for testing). A second connection carries the clipboard (see below).
++ *
++ * Framing: every message is a wdp_header followed by `size` payload bytes. Integers are little-endian,
++ * structs are packed. Receivers skip unknown message types (using `size`) and ignore trailing bytes of
++ * known ones, so later versions can append fields.
++ *
++ * Authentication (mutual): the launcher creates a random 32-byte token per session and gives it to
++ * both ends out of band (environment / WSLENV). The viewer proves it knows the token by sending its
++ * first half in WDP_HELLO; the compositor proves it by answering WDP_WELCOME with the second half.
++ * The viewer sends no input and no clipboard before it has checked that proof, so a process that
++ * grabbed the port first learns only a useless half of a one-time token. Anything else before a valid
++ * HELLO is a protocol error and closes the connection.
++ *
++ * Pixel transport:
++ *   WDP_TRANSPORT_SECTION: output buffers live in files on WSLg's section-backed virtio-fs share (DAX).
++ *     The viewer maps them with OpenFileMappingW("WSL\<vm id>\wslg\<name>"); WDP_FRAME carries only
++ *     the damage. Zero copies between Linux and Windows.
++ *   WDP_TRANSPORT_INLINE: pixels for each damage rectangle follow the WDP_FRAME payload (tightly
++ *     packed rows, 4 bytes per pixel, rectangle order). Works everywhere.
++ *
++ * Pacing: after WDP_FRAME the compositor renders the next frame for that output only after the viewer's
++ * WDP_FRAME_DONE (it has consumed the buffer and presented). A frame with no rectangles means "nothing
++ * changed" and is acknowledged like any other. Hidden outputs (WDP_OUTPUT_VISIBLE) are throttled.
++ *
++ * Pixel format of output buffers: DRM_FORMAT_XRGB8888 (bytes B,G,R,X in memory, which is
++ * DXGI_FORMAT_B8G8R8A8_UNORM). Cursor images: DRM_FORMAT_ARGB8888, premultiplied alpha.
++ *
++ * Clipboard channel: womarchy-clipd listens on the compositor's port + WDP_CLIP_PORT_OFFSET with its own
++ * 32-byte token and the same handshake (WDP_CLIP_HELLO / WDP_CLIP_WELCOME), then both sides send
++ * WDP_CLIP_TEXT whenever their clipboard changes.
++ */
++#ifndef WDP_H
++#define WDP_H
++#include <stdint.h>
++
++#define WDP_VERSION          2u
++#define WDP_TOKEN_BYTES      32u /* per-session secret; each side proves one half */
++#define WDP_PROOF_BYTES      16u
++#define WDP_NAME_BYTES       96u
++#define WDP_CLIP_PORT_OFFSET 1u
++
++/* limits both sides enforce */
++#define WDP_MAX_MONITORS  16u
++#define WDP_MAX_DIMENSION 16384u     /* output width/height in pixels */
++#define WDP_MAX_RECTS     64u        /* per frame; more damage is sent as its bounding box */
++#define WDP_MAX_CURSOR    256u       /* cursor image width/height */
++#define WDP_MAX_MESSAGE   (64u << 20) /* payload bytes; a full inline 4K frame is 33 MB */
++
++/* message types: viewer -> compositor */
++#define WDP_HELLO          1u  /* wdp_hello: must be first */
++#define WDP_MONITORS       2u  /* wdp_monitors + wdp_monitor[count]: the outputs the viewer shows */
++#define WDP_FRAME_DONE     3u  /* wdp_frame_done: frame consumed and presented; render the next */
++#define WDP_OUTPUT_VISIBLE 4u  /* wdp_output_visible: an output's window was hidden/minimised or shown */
++#define WDP_REFRESH        5u  /* wdp_refresh: send the next frame of an output with full damage */
++#define WDP_KEY            10u /* wdp_key */
++#define WDP_POINTER_ABS    11u /* wdp_pointer_abs */
++#define WDP_POINTER_REL    12u /* wdp_pointer_rel */
++#define WDP_POINTER_BUTTON 13u /* wdp_pointer_button */
++#define WDP_POINTER_AXIS   14u /* wdp_pointer_axis */
++#define WDP_POINTER_FRAME  15u /* no payload: groups the preceding pointer events */
++#define WDP_FOCUS          16u /* wdp_focus: the viewer gained/lost keyboard focus */
++#define WDP_QUIT           20u /* wdp_quit: the user closed the viewer; end the session */
++
++/* message types: compositor -> viewer */
++#define WDP_WELCOME        100u /* wdp_welcome: answer to a valid HELLO, proves the compositor */
++#define WDP_OUTPUT         101u /* wdp_output: output created or reconfigured */
++#define WDP_OUTPUT_REMOVED 102u /* wdp_output_removed */
++#define WDP_FRAME          103u /* wdp_frame + wdp_rect[nrects] (+ pixels if INLINE) */
++#define WDP_CURSOR         104u /* wdp_cursor (+ width*height*4 bytes if has_image) */
++#define WDP_BYE            110u /* wdp_bye: the compositor is exiting */
++
++/* message types: clipboard channel */
++#define WDP_CLIP_HELLO     200u /* viewer -> clipd: wdp_clip_hello */
++#define WDP_CLIP_TEXT      201u /* both ways: UTF-8 text with LF line endings; the whole payload */
++#define WDP_CLIP_WELCOME   202u /* clipd -> viewer: wdp_clip_welcome, proves clipd */
++
++/* transports (bit numbers in wdp_hello.transports) */
++#define WDP_TRANSPORT_INLINE  1u
++#define WDP_TRANSPORT_SECTION 2u
++
++#pragma pack(push, 1)
++
++struct wdp_header {
++    uint32_t type;
++    uint32_t size; /* payload bytes following this header */
++};
++
++struct wdp_hello {
++    uint32_t version;                /* WDP_VERSION */
++    uint8_t  proof[WDP_PROOF_BYTES]; /* token[0..16) */
++    uint32_t transports;             /* bitmask of (1 << WDP_TRANSPORT_*) the viewer supports */
++};
++
++struct wdp_monitor {
++    uint32_t id;          /* stable for the monitor while it stays connected; output name WSL-<id> */
++    int32_t  x, y;        /* position in the Windows virtual desktop, physical pixels */
++    uint32_t width;       /* physical pixels, 1..WDP_MAX_DIMENSION */
++    uint32_t height;
++    uint32_t refresh_mhz; /* e.g. 60000 */
++    uint32_t scale_1000;  /* Windows DPI scale * 1000 (1500 = 150 %) */
++    uint32_t primary;
++    char     name[64];    /* UTF-8, NUL padded (e.g. "DISPLAY1") */
++};
++
++struct wdp_monitors {
++    uint32_t count; /* <= WDP_MAX_MONITORS */
++    /* struct wdp_monitor monitors[count]; */
++};
++
++struct wdp_frame_done {
++    uint32_t output_id;
++    uint32_t reserved;
++    uint64_t seq;
++    uint64_t present_ns; /* when the frame reached the screen (QPC-based), 0 if unknown */
++};
++
++struct wdp_output_visible {
++    uint32_t output_id;
++    uint32_t visible; /* 0 = minimised/hidden: the compositor throttles this output */
++};
++
++struct wdp_refresh {
++    uint32_t output_id;
++};
++
++struct wdp_key {
++    uint32_t time_ms;
++    uint32_t key;     /* Linux evdev keycode (KEY_*) */
++    uint32_t pressed; /* 1 = down, 0 = up */
++};
++
++struct wdp_pointer_abs {
++    uint32_t time_ms;
++    uint32_t output_id;
++    double   x, y; /* output-local physical pixels */
++};
++
++struct wdp_pointer_rel {
++    uint32_t time_ms;
++    double   dx, dy; /* unaccelerated device units */
++};
++
++struct wdp_pointer_button {
++    uint32_t time_ms;
++    uint32_t button; /* BTN_LEFT = 0x110, BTN_RIGHT = 0x111, BTN_MIDDLE = 0x112, BTN_SIDE, BTN_EXTRA */
++    uint32_t pressed;
++};
++
++struct wdp_pointer_axis {
++    uint32_t time_ms;
++    uint32_t axis;        /* 0 = vertical, 1 = horizontal */
++    double   delta;       /* logical scroll distance (positive = down/right) */
++    int32_t  discrete120; /* wheel clicks * 120 (WHEEL_DELTA units), 0 for smooth scrolling */
++};
++
++struct wdp_focus {
++    uint32_t focused;
++};
++
++struct wdp_quit {
++    uint32_t reason; /* 0 = the user closed the window */
++};
++
++struct wdp_welcome {
++    uint32_t version;                /* WDP_VERSION */
++    uint32_t transport;              /* the chosen WDP_TRANSPORT_* */
++    char     vm_id[40];              /* WSL VM GUID (for section names), NUL padded */
++    uint8_t  proof[WDP_PROOF_BYTES]; /* token[16..32) */
++};
++
++struct wdp_output {
++    uint32_t output_id; /* the wdp_monitor.id it realises */
++    uint32_t width, height;
++    uint32_t refresh_mhz;
++    char     name[32];  /* compositor output name, e.g. "WSL-1" */
++};
++
++struct wdp_output_removed {
++    uint32_t output_id;
++};
++
++struct wdp_rect {
++    int32_t x, y, w, h; /* inside the buffer; w, h > 0 */
++};
++
++struct wdp_frame {
++    uint32_t output_id;
++    uint32_t width, height; /* buffer size in pixels */
++    uint32_t stride;        /* bytes per row of the buffer (SECTION), >= width * 4 */
++    uint32_t format;        /* DRM fourcc, XRGB8888 */
++    uint64_t seq;
++    char     buffer[WDP_NAME_BYTES]; /* SECTION: leaf name of the buffer file ([A-Za-z0-9._-]) */
++    uint32_t nrects;                 /* <= WDP_MAX_RECTS; 0 = nothing changed */
++    /* struct wdp_rect rects[nrects]; then, if INLINE, the pixels of each rect in order (w * 4 bytes per row) */
++};
++
++struct wdp_cursor {
++    uint32_t visible;
++    uint32_t has_image; /* 0 = only the visibility changed */
++    uint32_t width, height;
++    int32_t  hot_x, hot_y;
++    /* uint8_t argb8888[width * height * 4] if has_image */
++};
++
++struct wdp_bye {
++    int32_t code;
++};
++
++struct wdp_clip_hello {
++    uint32_t version;                /* WDP_VERSION */
++    uint8_t  proof[WDP_PROOF_BYTES]; /* clipboard token[0..16) */
++};
++
++struct wdp_clip_welcome {
++    uint32_t version;
++    uint8_t  proof[WDP_PROOF_BYTES]; /* clipboard token[16..32) */
++};
++
++#pragma pack(pop)
++#endif

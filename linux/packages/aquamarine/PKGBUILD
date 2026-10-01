@@ -4,7 +4,7 @@
 
 pkgname=aquamarine
 pkgver=0.15.1
-pkgrel=1.7
+pkgrel=1.9
 pkgdesc='a very light linux rendering backend library'
 arch=(x86_64 aarch64)
 url="https://github.com/hyprwm/$pkgname"
@@ -28,15 +28,15 @@ makedepends=(cmake
              hyprwayland-scanner)
 provides=("lib$pkgname.so")
 _archive="$pkgname-$pkgver"
-source=(0001-allocator-shm-allocator-for-drm-free-backends.patch 0002-backend-wsl-remote-viewer-backend.patch
+source=(0001-allocator-shm-allocator-for-backends-without-DRM.patch 0002-backend-wsl-a-remote-viewer-backend.patch
         "$url/archive/v$pkgver/$_archive.tar.gz")
 sha256sums=('SKIP' 'SKIP'
   '2f9de98c0bd1b7b1b09c576e390a2fef436449762fb334163c414f0c300296f2')
 
 prepare() {
 	cd "$srcdir"
-	patch -d "aquamarine-$pkgver" -Np1 -i "$srcdir/0001-allocator-shm-allocator-for-drm-free-backends.patch"
-	patch -d "aquamarine-$pkgver" -Np1 -i "$srcdir/0002-backend-wsl-remote-viewer-backend.patch"
+	patch -d "aquamarine-$pkgver" -Np1 -i "$srcdir/0001-allocator-shm-allocator-for-backends-without-DRM.patch"
+	patch -d "aquamarine-$pkgver" -Np1 -i "$srcdir/0002-backend-wsl-a-remote-viewer-backend.patch"
 }
 
 build() {

@@ -1,38 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shital Shah <2096835+sytelus@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 21:53:57 -0700
+Subject: [PATCH 1/5] render: DRM-free mode (surfaceless EGL, shm output
+ buffers)
+
+Let Hyprland composite on a GPU it can only reach through EGL (no DRM render node, no GBM, no
+dmabuf), e.g. Mesa's d3d12 driver in WSL2, or a VM/CI with only a surfaceless/software device.
+
+- OpenGL: when the backend has no DRM fd, initialise EGL on EGL_PLATFORM_SURFACELESS_MESA instead of
+  the device/GBM platforms.
+- Renderbuffer: output buffers that are CPU (shm) buffers get a GL framebuffer texture of their size
+  and format; after each frame, readbackToBuffer() copies only the damaged rectangles into the shm
+  buffer with glReadPixels (GL_PACK_ROW_LENGTH = stride), collapsing many rectangles to their extents.
+- GLRenderer::endRender calls the readback for normal (non-screencopy) renders.
+- Monitor: an shm buffer is a valid present buffer for the initial modeset, and shm swapchains
+  have two buffers, not three: the backend has at most one frame in flight, and allocation on
+  shared-memory filesystems is slow (3x 4K at three buffers each took over 10 s to start in WSL).
+
+Nothing changes when a DRM fd exists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/output/Monitor.cpp           | 12 ++++-
+ src/render/GLRenderer.cpp        | 12 ++++-
+ src/render/OpenGL.cpp            | 25 +++++++--
+ src/render/OpenGL.hpp            |  8 ++-
+ src/render/Renderbuffer.cpp      |  4 ++
+ src/render/Renderbuffer.hpp      |  3 ++
+ src/render/gl/GLRenderbuffer.cpp | 91 ++++++++++++++++++++++++++++++++
+ src/render/gl/GLRenderbuffer.hpp |  4 ++
+ 8 files changed, 150 insertions(+), 9 deletions(-)
+
 diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
-index e69d8dd..c01ff62 100644
+index e69d8dd..addd5af 100644
 --- a/src/output/Monitor.cpp
 +++ b/src/output/Monitor.cpp
-@@ -213,6 +213,8 @@ void CMonitor::onConnect(bool noRule) {
-     });
- 
-     m_listeners.state = m_output->events.state.listen([this](const Aquamarine::IOutput::SStateEvent& event) {
-+        Log::logger->log(Log::DEBUG, "Output {} state event: size {}, createdByUser {}, rule resolution {}", m_name, event.size, m_createdByUser,
-+                         m_activeMonitorRule.m_resolution);
-         if (event.size == Vector2D{}) {
-             // an indication to re-set state
-             // we can't do much for createdByUser displays I think
-@@ -2644,6 +2646,8 @@ void CMonitorState::ensureBufferPresent() {
+@@ -2644,6 +2644,8 @@ void CMonitorState::ensureBufferPresent() {
      if (STATE.buffer) {
          if (const auto params = STATE.buffer->dmabuf(); params.success && params.format == m_owner->m_drmFormat)
              return;
-+        if (STATE.buffer->shm().success)
++        if (const auto shm = STATE.buffer->shm(); shm.success && shm.format == m_owner->m_drmFormat && shm.size == m_owner->m_pixelSize)
 +            return;
      }
  
      // this is required for modesetting being possible and might be missing in case of first tests in the renderer
+@@ -2686,13 +2688,19 @@ bool CMonitorState::updateSwapchain() {
+         return true;
+     }
+ 
+-    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == 3 && OPTIONS.size == MODE->pixelSize)
++    // CPU (shm) output buffers are filled by a synchronous readback and handed to the backend, which has
++    // at most one frame in flight: double buffering is enough. A third buffer would only cost memory,
++    // allocation time (slow on shared-memory filesystems) and a larger damage area (buffer age).
++    const auto   ALLOC  = m_owner->m_output->getBackend()->preferredAllocator();
++    const size_t LENGTH = ALLOC && ALLOC->type() == Aquamarine::AQ_ALLOCATOR_TYPE_SHM ? 2 : 3;
++
++    if (OPTIONS.format == m_owner->m_drmFormat && OPTIONS.scanout && OPTIONS.length == LENGTH && OPTIONS.size == MODE->pixelSize)
+         return true;
+ 
+     auto options    = OPTIONS;
+     options.format  = m_owner->m_drmFormat;
+     options.scanout = true;
+-    options.length  = 3;
++    options.length  = LENGTH;
+     options.size    = MODE->pixelSize;
+     return m_owner->m_output->swapchain->reconfigure(options);
+ }
 diff --git a/src/render/GLRenderer.cpp b/src/render/GLRenderer.cpp
-index 1dab5a0..50d425a 100644
+index 1dab5a0..eca57b4 100644
 --- a/src/render/GLRenderer.cpp
 +++ b/src/render/GLRenderer.cpp
-@@ -105,8 +105,13 @@ void CHyprGLRenderer::endRender(const std::function<void()>& renderingDoneCallba
+@@ -105,8 +105,18 @@ void CHyprGLRenderer::endRender(const std::function<void()>& renderingDoneCallba
      if (m_renderMode == RENDER_MODE_FULL_FAKE)
          return;
  
 -    if (m_renderMode == RENDER_MODE_NORMAL)
 +    if (m_renderMode == RENDER_MODE_NORMAL) {
 +        // CPU (shm) output buffers can't be rendered to directly; copy the updated pixels over
-+        if (m_currentRenderbuffer)
-+            m_currentRenderbuffer->readbackToBuffer(g_pHyprRenderer->m_renderData.damage);
++        if (m_currentRenderbuffer) {
++            // render damage is in output coordinates; the buffer is untransformed (as in frameDamage)
++            CRegion bufferDamage = g_pHyprRenderer->m_renderData.damage.copy();
++            bufferDamage.transform(Math::wlTransformToHyprutils(Math::invertTransform(PMONITOR->m_transform)), PMONITOR->m_transformedSize.x,
++                                   PMONITOR->m_transformedSize.y);
++            m_currentRenderbuffer->readbackToBuffer(bufferDamage);
++        }
 +
          PMONITOR->m_output->state->setBuffer(m_currentBuffer);
 +    }
@@ -146,7 +197,7 @@ index e19af22..11c16f5 100644
  
        protected:
 diff --git a/src/render/gl/GLRenderbuffer.cpp b/src/render/gl/GLRenderbuffer.cpp
-index 794d035..cbc6180 100644
+index 794d035..052fbc1 100644
 --- a/src/render/gl/GLRenderbuffer.cpp
 +++ b/src/render/gl/GLRenderbuffer.cpp
 @@ -10,6 +10,7 @@
@@ -169,7 +220,7 @@ index 794d035..cbc6180 100644
      m_image = g_pHyprOpenGL->createEGLImage(dma);
      if (m_image == EGL_NO_IMAGE_KHR) {
          Log::logger->log(Log::ERR, "rb: createEGLImage failed");
-@@ -73,3 +79,77 @@ void CGLRenderbuffer::bind() {
+@@ -73,3 +79,88 @@ void CGLRenderbuffer::bind() {
  void CGLRenderbuffer::unbind() {
      GLFB(m_framebuffer)->unbind();
  }
@@ -195,6 +246,13 @@ index 794d035..cbc6180 100644
 +    if (!m_shm || !m_good)
 +        return;
 +
++    if (!g_pHyprOpenGL->m_exts.EXT_read_format_bgra) {
++        static bool warned = false;
++        if (!std::exchange(warned, true))
++            Log::logger->log(Log::ERR, "shm output: GL_EXT_read_format_bgra is missing, can't read frames back");
++        return;
++    }
++
 +    const auto buffer = m_hlBuffer.lock();
 +    if (!buffer)
 +        return;
@@ -202,12 +260,16 @@ index 794d035..cbc6180 100644
 +    const auto shm                = buffer->shm();
 +    auto [pixelData, fmt, bufLen] = buffer->beginDataPtr(0);
 +    const auto PFORMAT            = Hyprgraphics::Egl::getPixelFormatFromDRM(shm.format);
-+    if (!pixelData || !PFORMAT || shm.stride <= 0)
++    if (!pixelData || !PFORMAT || shm.stride <= 0) {
++        buffer->endDataPtr();
 +        return;
++    }
 +
 +    CRegion region = damage.copy().intersect(CBox{{}, shm.size});
-+    if (region.empty())
++    if (region.empty()) {
++        buffer->endDataPtr();
 +        return;
++    }
 +
 +    // every glReadPixels is a GPU sync point with a fixed cost; don't pay it per tiny rect
 +    if (region.getRects().size() > 4)

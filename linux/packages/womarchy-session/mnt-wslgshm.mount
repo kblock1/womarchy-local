@@ -2,11 +2,12 @@
 # omarchy.exe maps directly on Windows (OpenFileMappingW "WSL\<VM id>\wslg\<name>"), so no pixel copy
 # crosses the VM boundary. Only present when WSLg is enabled; womarchy-session falls back without it.
 # Statically enabled by the package (multi-user.target.wants, off the local-fs critical path: only the
-# session needs it); the conditions make it a no-op elsewhere.
+# session needs it). Conditions: WSLg is running (its /mnt/wslg is a mount point, not just a leftover
+# empty directory), so the unit is skipped, not failed, when GUI support is off.
 [Unit]
 Description=WSLg shared memory for womarchy (zero-copy frames)
 ConditionVirtualization=wsl
-ConditionPathExists=/mnt/wslg
+ConditionPathIsMountPoint=/mnt/wslg
 DefaultDependencies=no
 After=local-fs.target
 Before=multi-user.target
@@ -15,6 +16,6 @@ Before=multi-user.target
 What=wslg
 Where=/mnt/wslgshm
 Type=virtiofs
-Options=dax
+Options=dax,nosuid,nodev,noexec
 DirectoryMode=0755
 

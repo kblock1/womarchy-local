@@ -5,7 +5,7 @@ Description=womarchy clipboard bridge (Wayland <-> Windows)
 PartOf=graphical-session.target
 After=graphical-session.target
 Requisite=graphical-session.target
-ConditionEnvironment=WOMARCHY_TOKEN
+ConditionEnvironment=WOMARCHY_CLIP_TOKEN
 ConditionEnvironment=WAYLAND_DISPLAY
 
 [Service]

@@ -12,15 +12,15 @@
 #  - Overlay: womarchy-apply-system, womarchy-provision-user, the WSL leaves
 #    (/usr/lib/womarchy/wsl), user templates (/usr/lib/womarchy/user), OOBE.
 #
-# Local source: linux/image/build-image.sh (or build-compat.sh) packs
-# linux/overlay into womarchy-overlay.tar.gz next to this PKGBUILD.
+# Local source: linux/image/build-image.sh packs linux/overlay into
+# womarchy-overlay.tar.gz next to this PKGBUILD before running makepkg.
 
 pkgname=womarchy-compat
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Omarchy on WSL: bootloader/snapshot stand-ins and the womarchy WSL overlay'
 arch=(any)
-url='https://github.com/womarchy/womarchy'
+url='https://github.com/sytelus/womarchy'
 license=(MIT)
 depends=(bash jq perl pacman systemd sudo iproute2 desktop-file-utils)
 optdepends=('omarchy: the desktop this overlay adapts'
@@ -43,6 +43,8 @@ package() {
   install -Dm644 "$o/hooks/90-womarchy-wslg-apps.hook" "$pkgdir/usr/share/libalpm/hooks/90-womarchy-wslg-apps.hook"
   # Fallbacks appended to the session PATH (real tools win): nm-online
   install -Dm755 "$o/bin/nm-online" "$pkgdir/usr/lib/womarchy/bin/nm-online"
+  # GALLIUM_DRIVER=d3d12 for the user manager only when /dev/dxg exists
+  install -Dm755 "$o/systemd/60-womarchy-gpu" "$pkgdir/usr/lib/systemd/user-environment-generators/60-womarchy-gpu"
 
   install -d "$pkgdir/usr/lib/womarchy/wsl"
   install -m644 "$o"/wsl/*.sh "$pkgdir/usr/lib/womarchy/wsl/"

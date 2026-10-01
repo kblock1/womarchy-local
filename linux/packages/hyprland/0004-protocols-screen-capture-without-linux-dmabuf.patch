@@ -1,5 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shital Shah <2096835+sytelus@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 21:53:57 -0700
+Subject: [PATCH 4/5] protocols: screen capture without linux-dmabuf
+
+Without a DRM device the linux-dmabuf protocol is not created, but ext-image-copy-capture sessions
+called PROTO::linuxDma->getMainDevice() unconditionally (null dereference: any screenshot tool
+crashed the compositor). Only advertise dmabuf formats and the dmabuf device when the protocol
+exists, so clients use shm; wlr-screencopy likewise stops advertising linux_dmabuf then.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/protocols/ImageCopyCapture.cpp | 50 +++++++++++++++++-------------
+ src/protocols/Screencopy.cpp       |  3 +-
+ src/protocols/ToplevelExport.cpp   |  3 +-
+ 3 files changed, 33 insertions(+), 23 deletions(-)
+
 diff --git a/src/protocols/ImageCopyCapture.cpp b/src/protocols/ImageCopyCapture.cpp
-index 20d990b..f710462 100644
+index 20d990b..abfdc54 100644
 --- a/src/protocols/ImageCopyCapture.cpp
 +++ b/src/protocols/ImageCopyCapture.cpp
 @@ -70,6 +70,8 @@ void CImageCopyCaptureSession::sendConstraints() {
@@ -33,7 +50,7 @@ index 20d990b..f710462 100644
  
      m_bufferSize = m_session->bufferSize();
      m_resource->sendBufferSize(m_bufferSize.x, m_bufferSize.y);
-@@ -282,21 +287,26 @@ void CImageCopyCaptureCursorSession::sendConstraints() {
+@@ -282,21 +287,24 @@ void CImageCopyCaptureCursorSession::sendConstraints() {
  
      m_sessionResource->sendShmFormat(NFormatUtils::drmToShm(format));
  
@@ -52,6 +69,7 @@ index 20d990b..f710462 100644
 -        .data = sc<void*>(&device),
 -    };
 -    m_sessionResource->sendDmabufDevice(&deviceArr);
++    // no linux-dmabuf without a DRM device (e.g. the WSL backend): offer shm only
 +    if (PROTO::linuxDma) {
 +        auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
 +
@@ -61,10 +79,7 @@ index 20d990b..f710462 100644
 +            std::ranges::copy(modifiers, PMODIFIERS);
 +        m_sessionResource->sendDmabufFormat(format, &modsArr);
 +        wl_array_release(&modsArr);
-+    }
 +
-+    // no linux-dmabuf without a DRM device (e.g. the WSL backend): offer shm only
-+    if (PROTO::linuxDma) {
 +        dev_t           device    = PROTO::linuxDma->getMainDevice();
 +        struct wl_array deviceArr = {
 +            .size = sizeof(device),
@@ -94,3 +109,22 @@ index 75c2302..924cd11 100644
              m_resource->sendLinuxDmabuf(format, bufSize.x, bufSize.y);
  
          m_resource->sendBufferDone();
+diff --git a/src/protocols/ToplevelExport.cpp b/src/protocols/ToplevelExport.cpp
+index 4539ca5..5dbb9d5 100644
+--- a/src/protocols/ToplevelExport.cpp
++++ b/src/protocols/ToplevelExport.cpp
+@@ -1,4 +1,5 @@
+ #include "ToplevelExport.hpp"
++#include "LinuxDMABUF.hpp"
+ #include "../Compositor.hpp"
+ #include "ForeignToplevelWlr.hpp"
+ #include "../managers/screenshare/ScreenshareManager.hpp"
+@@ -86,7 +87,7 @@ CToplevelExportFrame::CToplevelExportFrame(SP<CHyprlandToplevelExportFrameV1> re
+     const auto stride = minStride(PSHMINFO, bufSize.x);
+     m_resource->sendBuffer(NFormatUtils::drmToShm(format), bufSize.x, bufSize.y, stride);
+ 
+-    if LIKELY (format != DRM_FORMAT_INVALID)
++    if LIKELY (format != DRM_FORMAT_INVALID && PROTO::linuxDma)
+         m_resource->sendLinuxDmabuf(format, bufSize.x, bufSize.y);
+ 
+     m_resource->sendBufferDone();
