@@ -1018,7 +1018,7 @@ fn open_section(vm_id: &str, name: &str, size: usize) -> windows::core::Result<M
         let handle = OpenFileMappingW(FILE_MAP_READ.0, false, PCWSTR(path.as_ptr()))?;
         let view = MapViewOfFile(handle, FILE_MAP_READ, 0, 0, size);
         if view.Value.is_null() {
-            let e = windows::core::Error::from_win32();
+            let e = windows::core::Error::from_thread();
             let _ = CloseHandle(handle);
             return Err(e);
         }

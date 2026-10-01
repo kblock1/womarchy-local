@@ -9,11 +9,8 @@ license = "MIT"
 name = "omarchy"
 path = "src/main.rs"
 
-[dependencies]
-windows-core = "0.61"
-
 [dependencies.windows]
-version = "0.61"
+version = "0.62"
 features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
