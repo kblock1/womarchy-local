@@ -1,0 +1,24 @@
+name: Feature request
+description: Something you'd like Omarchy on WSL to do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What would you like to do?
+      description: The task or workflow, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Ideas for how it could work
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Windows integration (clipboard, files, keys, windows)
+        - Graphics, monitors or performance
+        - Installing, updating or backups
+        - Something else

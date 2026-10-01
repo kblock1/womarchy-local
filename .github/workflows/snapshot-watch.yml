@@ -1,0 +1,95 @@
+# Daily: does womarchy's [womarchy] repository still fit Omarchy's current package snapshot?
+#
+# Cheap when nothing changed (a hash of the snapshot's database files, under a minute). When the
+# snapshot moved, it installs our packages on top of it in a clean Arch container and checks that
+# every library they link against resolves. If not, it opens (or updates) a "rebuild-needed" issue
+# that says what broke; once a rebuilt set fits again, it closes the issue.
+name: snapshot watch
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  SNAPSHOT: https://stable-mirror.omarchy.org
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    outputs:
+      checked: ${{ steps.seen.outputs.cache-hit != 'true' }}
+      report: ${{ steps.install.outputs.report }}
+    steps:
+      - name: Snapshot fingerprint
+        id: snap
+        run: |
+          fp=$(for r in core extra; do curl -fsSL "$SNAPSHOT/$r/os/x86_64/$r.db" | sha256sum; done |
+               sha256sum | cut -c1-16)
+          repo=$(curl -fsSL https://github.com/sytelus/womarchy/releases/download/repo/womarchy.db |
+                 sha256sum | cut -c1-16)
+          echo "key=snapshot-$fp-repo-$repo" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this snapshot and repository were already checked
+        id: seen
+        uses: actions/cache@v4
+        with:
+          path: checked
+          key: ${{ steps.snap.outputs.key }}
+
+      - name: Install our packages on the snapshot
+        if: steps.seen.outputs.cache-hit != 'true'
+        id: install
+        run: |
+          set -uo pipefail
+          echo "Server = $SNAPSHOT/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
+          # our repository first, as on installed systems (signature checks are not the point here)
+          sed -i '/^\[core\]/i [womarchy]\nSigLevel = Optional TrustAll\nServer = https://github.com/sytelus/womarchy/releases/download/repo\n' /etc/pacman.conf
+          pacman-key --init && pacman-key --populate archlinux
+          report=$(mktemp)
+          {
+            if ! pacman -Syyuu --noconfirm; then
+              echo "- moving the container to the snapshot failed"
+            elif ! out=$(pacman -S --noconfirm womarchy/aquamarine womarchy/hyprland womarchy/mesa womarchy/vulkan-dzn womarchy/womarchy-session 2>&1); then
+              echo "- **our packages no longer install on this snapshot:**"
+              echo '```'; grep -E 'error|breaks dependency|unable to satisfy|conflict' <<<"$out" | head -20; echo '```'
+            else
+              missing=$(for f in /usr/bin/Hyprland /usr/lib/libaquamarine.so /usr/lib/libgallium-*.so /usr/lib/libvulkan_dzn.so; do
+                          ldd "$f" | grep 'not found' | sed "s|^|$f: |"; done)
+              [[ -z $missing ]] || { echo "- **libraries our packages need are gone from this snapshot:**"; echo '```'; echo "$missing"; echo '```'; }
+            fi
+          } > "$report"
+          cat "$report"
+          { echo 'report<<EOF'; cat "$report"; echo EOF; } >> "$GITHUB_OUTPUT"
+          mkdir -p checked
+
+  issue:
+    needs: check
+    if: needs.check.outputs.checked == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open, update or close the rebuild issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REPORT: ${{ needs.check.outputs.report }}
+        run: |
+          gh label create rebuild-needed --color d93f0b \
+            --description "Omarchy's package snapshot moved; womarchy's packages need a rebuild" 2>/dev/null || true
+          open=$(gh issue list --label rebuild-needed --state open --json number --jq '.[0].number')
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [[ -n $REPORT ]]; then
+            body=$(printf '%s\n\n%s\n\n%s\n' \
+              "Omarchy's package snapshot changed and womarchy's packages no longer fit it ([check]($run)):" \
+              "$REPORT" \
+              "Fix: rebuild the affected packages with the [packages workflow](../actions/workflows/packages.yml). Until then, \`omarchy update\` stops before changing anything.")
+            if [[ -n $open ]]; then gh issue comment "$open" --body "$body"
+            else gh issue create --title "Rebuild needed: Omarchy's package snapshot moved" --label rebuild-needed --body "$body"; fi
+          elif [[ -n $open ]]; then
+            gh issue close "$open" --comment "Our packages fit the current snapshot again ([check]($run))."
+          fi

@@ -1,0 +1,78 @@
+# Cheap checks on every push and pull request (a few minutes on GitHub's free runners for public
+# repositories; nothing runs on a contributor's machine). Heavy work (package builds) lives in
+# packages.yml and only runs on demand.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  viewer:
+    name: omarchy.exe (build, unit tests, clippy)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows/omarchy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: windows/omarchy
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked
+      - run: cargo clippy --release --all-targets --locked -- -D warnings
+
+  scripts:
+    name: scripts and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell scripts parse and pass shellcheck
+        run: |
+          # every tracked file that is a shell script: *.sh, or a bash/sh shebang (e.g. linux/overlay/bin/*)
+          mapfile -t scripts < <(git ls-files | while read -r f; do
+            [[ -f $f ]] || continue
+            case $f in *.sh) echo "$f"; continue ;; esac
+            head -c 64 "$f" | head -n 1 | grep -qE '^#!.*\b(ba)?sh\b' && echo "$f"
+          done)
+          echo "${#scripts[@]} shell scripts"
+          for f in "${scripts[@]}"; do bash -n "$f" || exit 1; done
+          shellcheck --severity=error --shell=bash "${scripts[@]}"
+
+      - name: Python compiles
+        run: |
+          mapfile -t py < <(git ls-files '*.py'; git ls-files | xargs grep -l -m1 '^#!.*python' 2>/dev/null | grep -v '\.py$')
+          python3 - "${py[@]}" <<'EOF'
+          import sys
+          for path in sys.argv[1:]:
+              compile(open(path, encoding="utf-8").read(), path, "exec")
+          print(len(sys.argv) - 1, "Python files compile")
+          EOF
+
+      - name: PowerShell parses
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($f in git ls-files '*.ps1') {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors)
+            if ($errors) { $bad++; $errors | ForEach-Object { Write-Host "${f}: $($_.Message)" } }
+          }
+          if ($bad) { exit 1 }
+
+      - name: Links in the docs resolve
+        run: python3 tools/check-links.py
+
+      - name: No secrets or personal paths
+        run: python3 tools/check-secrets.py

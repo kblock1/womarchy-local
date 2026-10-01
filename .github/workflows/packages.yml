@@ -1,0 +1,137 @@
+# Build womarchy's packages against Omarchy's package snapshot and publish them to the signed
+# [womarchy] pacman repository (the GitHub release tagged "repo").
+#
+# On demand only (Actions tab → packages → Run workflow), e.g. when snapshot-watch.yml opens a
+# "rebuild-needed" issue. Free on GitHub's runners for this public repository.
+#
+#   build    compiles the requested packages in an Arch container that uses the same snapshot as
+#            installed systems (stable-mirror.omarchy.org), with no access to any secret.
+#   publish  waits for a maintainer's approval (environment "womarchy-repo"), then signs the new
+#            packages, the repository database and any older package still unsigned, and uploads
+#            them. It is the only job that can read the signing key.
+name: packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: >-
+          Packages to build, space-separated (aquamarine hyprland mesa-womarchy womarchy-session
+          womarchy-compat womarchy-keyring). Leave empty to only (re)sign and publish the repository.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages
+  cancel-in-progress: false
+
+env:
+  SNAPSHOT_MIRROR: https://stable-mirror.omarchy.org/$repo/os/$arch
+  SIGNING_KEY_FPR: EB71032617BBA1C4C8EE77C3047A25C1135F969D
+
+jobs:
+  build:
+    if: inputs.packages != ''
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 300
+    steps:
+      - name: Use Omarchy's package snapshot
+        run: |
+          echo "Server = $SNAPSHOT_MIRROR" > /etc/pacman.d/mirrorlist
+          pacman-key --init
+          pacman-key --populate archlinux
+          # the container image is newer than the snapshot: move everything to the snapshot
+          pacman -Syyuu --noconfirm git sudo
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          # makepkg refuses to run as root
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          read -r -a pkgs <<<"$PACKAGES"
+          sudo -u builder env WOMARCHY_REPO="$GITHUB_WORKSPACE/out/repo" \
+            bash linux/packages/build-all.sh "${pkgs[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: out/repo/*.pkg.tar.zst
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    # also runs (to sign and publish) when no packages were requested
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    environment: womarchy-repo
+    permissions:
+      contents: write
+    steps:
+      - name: Tools
+        run: |
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman -Syu --noconfirm github-cli gnupg
+
+      - uses: actions/download-artifact@v4
+        if: needs.build.result == 'success'
+        with:
+          name: packages
+          path: new
+
+      - name: Sign and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SIGNING_KEY: ${{ secrets.WOMARCHY_REPO_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME=$(mktemp -d)
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          gpg --list-secret-keys --with-colons | grep -q "fpr:::::::::$SIGNING_KEY_FPR:" ||
+            { echo "the signing secret is not key $SIGNING_KEY_FPR"; exit 1; }
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase '' --local-user "$SIGNING_KEY_FPR" --detach-sign "$1"; }
+
+          mkdir -p repo && cd repo
+          gh release download repo --pattern 'womarchy.db.tar.gz' --pattern 'womarchy.files.tar.gz'
+          assets=$(gh release view repo --json assets --jq '.assets[].name')
+
+          # new packages: sign and add to the database
+          new=()
+          shopt -s nullglob
+          for f in ../new/*.pkg.tar.zst; do cp "$f" .; new+=("$(basename "$f")"); done
+          for f in "${new[@]}"; do sign "$f"; done
+          ((${#new[@]} == 0)) || repo-add womarchy.db.tar.gz "${new[@]}"
+
+          # older packages still on the release without a signature (rollbacks download them)
+          old=()
+          for f in $(grep '\.pkg\.tar\.zst$' <<<"$assets"); do
+            [[ " ${new[*]} " == *" $f "* ]] && continue
+            grep -qxF "$f.sig" <<<"$assets" && continue
+            gh release download repo --pattern "$f"
+            sign "$f"
+            old+=("$f.sig")
+            rm -f "$f"
+          done
+
+          # pacman fetches womarchy.db / womarchy.files: publish real copies (no symlinks) and sign all
+          cp womarchy.db.tar.gz womarchy.db
+          cp womarchy.files.tar.gz womarchy.files
+          for f in womarchy.db womarchy.db.tar.gz womarchy.files womarchy.files.tar.gz; do sign "$f"; done
+
+          upload=(womarchy.db womarchy.db.sig womarchy.db.tar.gz womarchy.db.tar.gz.sig
+                  womarchy.files womarchy.files.sig womarchy.files.tar.gz womarchy.files.tar.gz.sig "${old[@]}")
+          for f in "${new[@]}"; do upload+=("$f" "$f.sig"); done
+          gh release upload repo "${upload[@]}" --clobber
+          echo "published: ${new[*]:-(no new packages)}; signed ${#old[@]} older packages"

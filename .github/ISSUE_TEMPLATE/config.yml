@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/sytelus/womarchy/blob/main/docs/TROUBLESHOOTING.md
+    about: Logs, common problems and their fixes.
+  - name: Report a security problem privately
+    url: https://github.com/sytelus/womarchy/security/advisories/new
+    about: Please don't file security problems as public issues.
+  - name: Omarchy itself (not specific to WSL)
+    url: https://github.com/basecamp/omarchy/issues
+    about: Problems that also happen on a regular Omarchy install.
