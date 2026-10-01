@@ -21,7 +21,7 @@ themselves are in [patches/](../patches/README.md).
 | # | Project | Change | Kind | Notes |
 |---|---|---|---|---|
 | 1 | Hyprland | [0004](../patches/hyprland/0004-protocols-screen-capture-without-linux-dmabuf.patch) screen capture without linux-dmabuf | crash fix | Independent. Reproducible on any setup where linux-dmabuf isn't created (e.g. software rendering). |
-| 2 | Hyprland | [0005](../patches/hyprland/0005-input-absolute-pointer-motion-relative-to-the-backen.patch) absolute motion per output | bug fix | Independent. Reproducible with the Wayland backend and several outputs (nested Hyprland with two windows). |
+| 2 | Hyprland | [0005](../patches/hyprland/0005-input-absolute-pointer-motion-relative-to-the-backen.patch) absolute motion per output | bug fix | **Already fixed upstream** (main passes the output to `warpAbsolute`). Drop the patch when we move to a Hyprland release that has it. |
 | 3 | Mesa | [0001](../patches/mesa/0001-d3d12-reclaim-outside-pb-manager-locks.patch) d3d12 reclaim deadlock | deadlock fix | Independent. Merge request on gitlab.freedesktop.org, with the backtrace from the commit message. |
 | 4 | Microsoft WSL | Issues (below) | reports | No code. |
 | 5 | aquamarine | [0001](../patches/aquamarine/0001-allocator-shm-allocator-for-backends-without-DRM.patch) shm allocator | feature | Generic: it also helps headless CI and software rendering. Open an issue first to agree on the shape (memfd vs directory-backed files). |
@@ -53,10 +53,30 @@ We don't fork Omarchy: the image runs its normal installer, and [linux/overlay](
 
 Upstreaming these would shrink the overlay's `womarchy-apply-system` to almost nothing.
 
+## Prepared submissions
+
+Some projects forbid AI tools from opening pull requests or issues, or from writing their text:
+- **Hyprland:** see their [AI policy](https://github.com/hyprwm/.github/blob/main/policies/AI_USAGE.md). Only contributors they have vouched for can open PRs.
+- **Mesa:** agents may not interact with its GitLab.
+
+So everything below is prepared for a maintainer of this repo to review and submit. `python3 tools/make-upstream-page.py` writes `out/upstream/index.html`, a page with every item's text, copy buttons and links.
+
+| Change | Prepared as | Submitted | Status |
+|---|---|---|---|
+| Omarchy: kernel-reboot prompt only when pacman manages a kernel | branch `kernel-reboot-prompt-without-pacman-kernel` on the maintainer's fork; PR text ready | | Tested on WSL: the prompt is gone; other cases unchanged |
+| Hyprland 0004: screen capture without linux-dmabuf | branch `fix/screencopy-without-dmabuf` on the maintainer's fork (rebased on main) | | The maintainer writes the PR text (Hyprland's rules) |
+| Mesa 0001: d3d12 reclaim deadlock | patch + merge-request text | | Applies cleanly to Mesa main |
+| WSL: systemd-binfmt fails on 3.0.1 | pre-filled issue | | Related to microsoft/WSL#41739 |
+| WSL: write-combine upload heaps at ~9 MB/s | pre-filled issue | | |
+| WSL: named `wsl --install` runs DISM | pre-filled issue | | |
+| WSLg: supported zero-copy shared memory | issue form texts | | |
+
+Not prepared: the getty@tty1 start-limit problem (no logs were kept; it needs a fresh capture first).
+
 ## Tracking
 
 Keep this table current. When something is merged, delete the patch here and bump the pinned version.
 
 | Change | Submitted | Status |
 |---|---|---|
-| (none yet) | | |
+| (none submitted yet; see "Prepared submissions") | | |

@@ -633,3 +633,55 @@ Tests used only the small packages and a throwaway distro installed from the exi
   - a full image build with the signed repo, including the OOBE populating `womarchy` in a fresh image;
   - `build-all.sh` on the compiled packages, which needs a heavy build.
   Both wait for the release build.
+
+### 27. Updates that can be undone, signed repository, CI, clipboard images, browser and microphone (2026-10-01)
+
+**CI (free on GitHub's runners for this public repo):**
+
+| Workflow | When | What |
+|---|---|---|
+| `checks` | Every push | Build, unit tests and clippy for `omarchy.exe`; shellcheck; Python and PowerShell parse checks; a link check; a secret and personal-path scan. |
+| `packages` | On demand | Builds in an Arch container on Omarchy's snapshot. Signing and publishing wait for the owner's approval in the `womarchy-repo` environment, the only place the signing key exists. |
+| `snapshot-watch` | Daily | Cheap unless Omarchy's snapshot moved. Then it installs our packages on the snapshot, runs `ldd`, and opens or closes a `rebuild-needed` issue. |
+
+Also turned on: private vulnerability reporting, secret scanning with push protection, and Dependabot alerts. Added issue forms and community files.
+
+**Signing:**
+- **Key:** generated in RAM in the lab distro. The private half went straight into the environment secret and was never on disk; the public half is `linux/packages/womarchy-keyring`.
+- **The v0.1.0 problem (found by the agent's test):** a v0.1.0 install (`Optional TrustAll`, no key) fails to sync a db that has a `.sig` from an unknown key.
+- **Decision:** the signed repo moves to a new release tag, `packages`. The old `repo` tag stays unsigned and frozen, holding the same compat, keyring and session builds, so v0.1.0 installs update, get the key and switch over by themselves.
+
+**omarchy.exe:**
+- **New commands:** `update`, `rollback`, `backup` and `restore`. Tested on a throwaway distro:
+  - **rollback:** the point was recorded, and the added package was removed through `omarchy rollback --yes`.
+  - **backup:** 6.5 GB in 104 s.
+  - **restore:** 25 s, back to the backup's state, default user kept.
+  - **update:** runs Omarchy's updater. Without a terminal, Omarchy's gum prompt spins forever, so `update` now refuses to run without one.
+- **Clipboard images both ways:**
+  - **Protocol:** a new `CLIP_IMAGE` message carrying PNG. No version bump: unknown types are skipped.
+  - **Conversion:** via the Windows Imaging Component; the Windows clipboard gets both "PNG" and CF_DIB.
+  - **Tests:** `clipboard-test.ps1` passes 5/5. It now waits for the clipboard channel, because a distro's first session is slower.
+- **`windows` crate 0.62:** supersedes Dependabot's PR (`from_win32` → `from_thread`; dropped the unused direct windows-core dependency).
+
+**Chromium (measured in a 1600x1000 window):** out of the box, Chromium under WSL is fully software, with no WebGL (GPU blocklist).
+
+| Flags | Result | CPU |
+|---|---|---|
+| `--ignore-gpu-blocklist` (Wayland) | GPU raster and video decode report on, but WebGL canvases stay **white**: no output | |
+| `--ozone-platform=x11` + `--ignore-gpu-blocklist` | WebGL renders correctly at 60 FPS | 2.3–3.9 cores in Chromium, plus 0.3 in Hyprland (software Xwayland) |
+
+Decision: no default change. TROUBLESHOOTING documents the X11 opt-in for WebGL-heavy sites.
+
+**Microphone:** WSLg's `RDPSource` is the default source and streams samples. Windows' privacy log shows WSLg's `msrdc.exe` used the microphone during the test.
+
+**High refresh:** a fake 144 Hz monitor shows up in Hyprland as `1280x720@144`. Pacing is ack/vsync-bound per monitor; there is no >60 Hz hardware here to test on.
+
+**Upstream submissions (prepared, not submitted; `tools/make-upstream-page.py` → `out/upstream/index.html`):**
+- **Hyprland:** their AGENTS.md forbids AI tools from opening PRs or writing their text, and new contributors must be vouched first. So only the branch `fix/screencopy-without-dmabuf` was prepared (on the owner's fork, rebased on main, clean apply), with facts for the owner's own description. Patch 0005 (per-output pointer) is already fixed on Hyprland's main.
+- **Omarchy:** branch `kernel-reboot-prompt-without-pacman-kernel` on the owner's fork, made through the API with no clone. Tested on WSL: upstream's script printed "Linux kernel has been updated"; the patched one prints nothing. A stubbed test covered the other cases.
+- **Mesa:** patch 0001 applies cleanly to main (checked by reading the two files). The MR text is ready; the owner submits.
+- **Microsoft:**
+  - three WSL issues (binfmt, write-combine upload heaps, DISM from named install), pre-filled after a duplicate search; the binfmt one references #41739;
+  - one WSLg feature request (supported zero-copy shared memory), with texts to copy into its form.
+
+**Waiting for the owner:** approval of the `packages` publish run. After it come the transition upload to `repo`, the release image build, testing it, and release v0.2.0.

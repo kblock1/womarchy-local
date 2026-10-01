@@ -22,17 +22,20 @@ Companion to [FEASIBILITY.md](FEASIBILITY.md) (read that first for the evidence)
 | M0 spikes | Done. DRM-free Hyprland on d3d12 (surfaceless EGL). Transport: WSLg's DAX share (zero-copy sections) plus hvsocket control. |
 | M1 packages | Done. `[womarchy]` repo with aquamarine, hyprland, Mesa (two d3d12 patches: deadlock fix, WSL 3.0.1 write-combine upload fix), and `womarchy-session`. |
 | M2 Omarchy image | Done. Omarchy 4.0.4 Lite `.wsl` (1.7 GB): first-run setup, WSL leaves, user overlay. Tested by a fresh install each build. |
-| M3 viewer | Done. `omarchy.exe` full-screen/windowed; protocol v2 with mutual authentication; one presenter thread and swapchain per output; keyboard hook (Super), mouse, cursor, clipboard (text); exit codes; device-loss recovery. |
-| M4 polish | Mostly done. Verified: three 4K monitors with mixed DPI (150%/175%) at ~100 frames/s combined; live display changes; audio via WSLg. Cold start on 3x4K takes ~5 s (was ~17 s). Open: hardware video decode paths. |
-| M5 installer | Mostly done. `install.ps1` (installs or updates WSL with a clear warning, then downloads and installs); `omarchy install / uninstall / status`; GitHub releases (lite image only: the full image exceeds GitHub's 2 GB asset limit). Open: CI rebuilds against Omarchy's snapshots, package signing, `omarchy update`. |
-| M6 upstreaming | Planned: see [UPSTREAMING.md](UPSTREAMING.md). |
+| M3 viewer | Done. `omarchy.exe` full-screen/windowed; protocol v2 with mutual authentication; one presenter thread and swapchain per output; keyboard hook (Super), mouse, cursor, clipboard (text and images); exit codes; device-loss recovery. |
+| M4 polish | Mostly done. Verified: three 4K monitors with mixed DPI (150%/175%) at ~100 frames/s combined; live display changes; audio and microphone via WSLg. Cold start on 3x4K takes ~5 s (was ~17 s). Known limit: Chromium runs without GPU compositing or WebGL (no dmabuf in WSL). Open: hardware video decode paths. |
+| M5 installer and updates | Done. `install.ps1` (installs or updates WSL with a clear warning); `omarchy install / uninstall / status / update / rollback / backup / restore`; GitHub releases (lite image only: the full image exceeds GitHub's 2 GB asset limit); signed `[womarchy]` repository; overlay updates through packages; CI (checks on every push, on-demand package builds with approval-gated signing, a daily snapshot watch). |
+| M6 upstreaming | In progress: the first submissions (Omarchy, Hyprland, Mesa, Microsoft) are prepared for review; see [UPSTREAMING.md](UPSTREAMING.md). |
 
 **Update strategy:**
-- `[womarchy]` is listed first in `pacman.conf`. pacman takes a package from the first repo that has it, so `omarchy update` keeps our `hyprland`, `aquamarine` and `mesa` even when `[extra]` has newer ones.
-- Hosting: the repo is served from the GitHub release tagged `repo`, with the image's local copy as an offline fallback. It is unsigned for now (`SigLevel = Optional TrustAll`, over HTTPS only); signing is open.
-- Their *dependencies* (hyprutils, hyprlang, hyprgraphics, hyprwayland-scanner, libdisplay-info, llvm-libs, …) still move with Omarchy's Arch snapshot (`stable-mirror.omarchy.org`). A soname bump there breaks our older builds.
-- So the repo must be rebuilt whenever Omarchy advances its snapshot: a CI job in an Arch container that runs `regen-pkgbuilds.sh` against the snapshot's PKGBUILDs, then `build-all.sh`, signs and publishes. Until that exists, an `omarchy update` after Omarchy advances its snapshot can pull Hyprland-library bumps our packages weren't built against.
-  - Interim options: `IgnorePkg` the hypr* libraries (updates then stop with a dependency error instead of breaking the desktop), or rebuild locally with `build-all.sh`.
+- **Package precedence.** `[womarchy]` is listed first in `pacman.conf`. pacman takes a package from the first repo that has it, so `omarchy update` keeps our `hyprland`, `aquamarine`, `mesa` and `womarchy-compat` even when Arch has newer ones.
+- **Hosting and signing.** The repo is the GitHub release tagged `packages`, with the image's local copy as an offline fallback.
+  - Its database is signed in CI after a maintainer approves (`SigLevel = PackageOptional DatabaseRequired`).
+  - The old unsigned `repo` tag is frozen; it only moves v0.1.0 installs over.
+- **Keeping up with Omarchy.** Our packages' *dependencies* (hyprutils, hyprlang, hyprgraphics, llvm-libs, ...) move with Omarchy's Arch snapshot (`stable-mirror.omarchy.org`).
+  - When the snapshot moves past what our builds were linked against, pacman refuses the update (soname dependencies; a hook for Mesa's LLVM). Nothing breaks: the update just stops.
+  - The daily snapshot watch opens a `rebuild-needed` issue, and the on-demand `packages` workflow rebuilds against the new snapshot.
+- **Undo.** `omarchy rollback` restores the previous package versions; `omarchy backup` / `restore` cover the whole distro.
 
 ---
 
