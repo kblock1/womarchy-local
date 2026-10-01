@@ -2,7 +2,7 @@
 
 Run [Omarchy](https://omarchy.org), the Arch Linux + Hyprland desktop, on Windows 11, full screen on
 all your monitors, composited on your GPU. Type `omarchy` at any Windows prompt to get the desktop; log
-out to get your prompt back.
+out to get your prompt back. (An unofficial project, not affiliated with Omarchy or Basecamp.)
 
 ![Omarchy on three 4K monitors with mixed DPI, a GL and a Vulkan app running](docs/img/three-monitors.png)
 
