@@ -292,3 +292,74 @@ pub fn parse_frame(r: &mut Reader) -> Option<Frame> {
     }
     Some(Frame { output, width, height, stride, seq, buffer, rects })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token() -> [u8; TOKEN_BYTES] {
+        std::array::from_fn(|i| i as u8 + 1)
+    }
+
+    /// A FRAME payload as the compositor sends it (header fields, buffer name, rectangles).
+    fn frame(width: u32, height: u32, stride: u32, name: &str, rects: &[(i32, i32, i32, i32)]) -> Vec<u8> {
+        let mut m = Msg::new(FRAME);
+        m.u32(1).u32(width).u32(height).u32(stride).u32(0).u64(7).fixed_str(name, NAME_BYTES).u32(rects.len() as u32);
+        for &(x, y, w, h) in rects {
+            m.i32(x).i32(y).i32(w).i32(h);
+        }
+        m.finish()[8..].to_vec() // payload only (without the 8-byte header)
+    }
+
+    fn parse(payload: &[u8]) -> Option<Frame> {
+        parse_frame(&mut Reader::new(payload))
+    }
+
+    #[test]
+    fn handshake_proofs() {
+        let t = token();
+        let h = hello(&t, 1 << TRANSPORT_SECTION);
+        // HELLO payload: version, our half of the token, transports
+        assert_eq!(&h[12..12 + PROOF_BYTES], &t[..PROOF_BYTES]);
+        assert!(proves(&t, &t[PROOF_BYTES..]));
+        assert!(!proves(&t, &t[..PROOF_BYTES]), "our own half must not count as the compositor's proof");
+        assert!(!proves(&t, &t[PROOF_BYTES..TOKEN_BYTES - 1]), "short proof");
+        assert!(!proves(&t, &[]));
+    }
+
+    #[test]
+    fn valid_frames_parse() {
+        let f = parse(&frame(3840, 2160, 3840 * 4, "womarchy-1-2-3840x2160", &[(0, 0, 3840, 2160), (10, 20, 30, 40)])).unwrap();
+        assert_eq!((f.output, f.width, f.height, f.seq), (1, 3840, 2160, 7));
+        assert_eq!(f.buffer, "womarchy-1-2-3840x2160");
+        assert_eq!(f.rects.len(), 2);
+        assert_eq!((f.rects[1].x, f.rects[1].y, f.rects[1].w, f.rects[1].h), (10, 20, 30, 40));
+        // "nothing changed" frames have no rectangles
+        assert!(parse(&frame(800, 600, 3200, "", &[])).unwrap().rects.is_empty());
+    }
+
+    #[test]
+    fn invalid_frames_are_rejected() {
+        let ok = |w, h, s| frame(w, h, s, "buf", &[(0, 0, 1, 1)]);
+        assert!(parse(&ok(0, 600, 3200)).is_none(), "zero width");
+        assert!(parse(&ok(MAX_DIMENSION + 1, 600, (MAX_DIMENSION + 1) * 4)).is_none(), "too wide");
+        assert!(parse(&ok(800, 600, 800 * 4 - 1)).is_none(), "stride shorter than a row");
+        for r in [(-1, 0, 1, 1), (0, 0, 0, 1), (0, 0, 801, 1), (799, 0, 2, 1), (0, 599, 1, 2), (i32::MAX, 0, i32::MAX, 1)] {
+            assert!(parse(&frame(800, 600, 3200, "buf", &[r])).is_none(), "rectangle {:?} outside 800x600", r);
+        }
+        for name in ["../etc", "a/b", r"a\b", "x y", "x:y"] {
+            assert!(parse(&frame(800, 600, 3200, name, &[])).is_none(), "buffer name {:?}", name);
+        }
+        let many = vec![(0, 0, 1, 1); MAX_RECTS + 1];
+        assert!(parse(&frame(800, 600, 3200, "buf", &many)).is_none(), "too many rectangles");
+    }
+
+    #[test]
+    fn truncated_frames_are_rejected() {
+        let full = frame(800, 600, 3200, "buf", &[(0, 0, 10, 10), (5, 5, 10, 10)]);
+        for len in 0..full.len() {
+            assert!(parse(&full[..len]).is_none(), "accepted a frame cut at {} of {} bytes", len, full.len());
+        }
+        assert!(parse(&full).is_some());
+    }
+}

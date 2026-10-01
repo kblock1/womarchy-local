@@ -112,3 +112,31 @@ pub fn parse_env(spec: &str) -> Vec<Monitor> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mon(id: u32, name: &str, x: i32) -> Monitor {
+        Monitor { id, x, y: 0, width: 3840, height: 2160, refresh_mhz: 60000, scale_1000: 1500, primary: x == 0, name: name.into() }
+    }
+
+    #[test]
+    fn ids_follow_monitors_by_name() {
+        let before = vec![mon(1, "DISPLAY1", 0), mon(2, "DISPLAY2", 3840), mon(3, "DISPLAY3", 7680)];
+        // DISPLAY2 unplugged, a new one plugged in, the order changed
+        let now = keep_ids(&before, vec![mon(0, "DISPLAY3", 0), mon(0, "DISPLAY4", 3840), mon(0, "DISPLAY1", 7680)]);
+        let ids: Vec<(String, u32)> = now.iter().map(|m| (m.name.clone(), m.id)).collect();
+        assert_eq!(ids[0], ("DISPLAY3".into(), 3));
+        assert_eq!(ids[2], ("DISPLAY1".into(), 1));
+        // the new monitor gets an id nobody had: not DISPLAY2's 2, which may still be on its way out
+        assert_eq!(ids[1].1, 4);
+    }
+
+    #[test]
+    fn env_round_trip() {
+        let mons = vec![mon(1, "DISPLAY1", 0), mon(2, "", -1920)];
+        assert_eq!(parse_env(&to_env(&mons)), mons);
+        assert!(parse_env("garbage;1:2").is_empty());
+    }
+}

@@ -30,7 +30,8 @@ picture.
 ```
 cd windows/omarchy
 cargo build --release                 # target/release/omarchy.exe
-cargo clippy --release -- -D warnings # must stay clean
+cargo test --release                  # protocol parsing and monitor-id unit tests
+cargo clippy --release --all-targets -- -D warnings   # must stay clean
 ```
 
 **Packages** (inside the Arch build distro, as a user with sudo; Mesa and Hyprland take a while and run under `nice`):
