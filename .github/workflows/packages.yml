@@ -115,11 +115,14 @@ jobs:
           if ! gh release view "$RELEASE" >/dev/null 2>&1; then
             gh release create "$RELEASE" --prerelease --title "[womarchy] pacman repository (signed)" \
               --notes "The signed [womarchy] pacman repository that Omarchy-on-WSL installs update from. Not meant to be downloaded by hand: see the README."
+          fi
+          if gh release view "$RELEASE" --json assets --jq '.assets[].name' | grep -qx 'womarchy.db.tar.gz'; then
+            gh release download "$RELEASE" --pattern 'womarchy.db.tar.gz' --pattern 'womarchy.files.tar.gz'
+          else
+            # no database yet (first publish, or one that failed before uploading): seed from `repo`
             for f in $(gh release view repo --json assets --jq '.assets[].name' | grep '\.pkg\.tar\.zst$'); do
               [[ -e $f ]] || { gh release download repo --pattern "$f"; seeded+=("$f"); }
             done
-          else
-            gh release download "$RELEASE" --pattern 'womarchy.db.tar.gz' --pattern 'womarchy.files.tar.gz'
           fi
           assets=$(gh release view "$RELEASE" --json assets --jq '.assets[].name')
 
@@ -138,7 +141,8 @@ jobs:
             rm -f "$f"
           done
 
-          # pacman fetches womarchy.db / womarchy.files: publish real copies (no symlinks) and sign all
+          # pacman fetches womarchy.db / womarchy.files: publish real copies (repo-add makes them symlinks)
+          rm -f womarchy.db womarchy.files
           cp womarchy.db.tar.gz womarchy.db
           cp womarchy.files.tar.gz womarchy.files
           for f in womarchy.db womarchy.db.tar.gz womarchy.files womarchy.files.tar.gz; do sign "$f"; done
