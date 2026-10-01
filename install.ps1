@@ -24,12 +24,15 @@
     Use this omarchy.exe instead of downloading it (for testing a build).
 .PARAMETER Yes
     Don't ask for confirmation.
+.PARAMETER NoLauncher
+    Install only the distro: no Start menu entry, PATH entry or copy of omarchy.exe (for testing).
 #>
 param(
     [string]$Distro = "Omarchy",
     [string]$Image = "",
     [string]$Exe = "",
-    [switch]$Yes
+    [switch]$Yes,
+    [switch]$NoLauncher
 )
 
 # Native commands are checked through $LASTEXITCODE; with "Stop", Windows PowerShell 5.1 would turn any
@@ -156,6 +159,7 @@ try {
     $installArgs = @("install")
     if ($Image) { $installArgs += $Image }
     if ($Distro -ne "Omarchy") { $installArgs += @("--distro", $Distro) }
+    if ($NoLauncher) { $installArgs += "--no-launcher" }
     & (Join-Path $work "omarchy.exe") @installArgs
     if ($LASTEXITCODE -ne 0) { Stop-Install "omarchy install failed (exit code $LASTEXITCODE)." }
 } finally {
