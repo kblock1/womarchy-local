@@ -1,0 +1,13 @@
+# Upstream sources (fetched) and our working forks of them: patches/ is the source of truth
+upstream/
+src/
+
+# Build outputs
+out/
+**/build/
+windows/omarchy/target/
+*.pkg.tar.zst
+
+# Test and experiment outputs
+lab/out/
+__pycache__/

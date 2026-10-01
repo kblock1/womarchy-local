@@ -1,0 +1,71 @@
+From: womarchy
+Subject: [PATCH] d3d12: reclaim completed BOs outside of pb manager locks
+
+d3d12_bo_new() is the pb provider behind the slab and cache managers.
+pb_slab_manager_create_buffer() holds the slab manager mutex while it
+calls pb_slab_create() -> provider->create_buffer() -> d3d12_bo_new().
+d3d12_bo_new() then called d3d12_screen_reclaim_completed(), which drops
+retired BOs; if one of them is a slab sub-allocation its destroy path is
+pb_slab_buffer_destroy(), which locks the same (non-recursive) mutex and
+self-deadlocks the calling thread.
+
+Seen on WSL2 (RTX 5070, Mesa 26.2.3) with Hyprland: the first
+glTexImage2D() of a text texture hangs forever:
+  mtx_lock <- pb_slab_buffer_destroy <- d3d12_bo_unreference
+  <- d3d12_screen_reclaim_completed <- d3d12_bo_new
+  <- d3d12_bufmgr_create_buffer <- pb_cache_manager_create_buffer
+  <- pb_slab_create <- pb_slab_manager_create_buffer (holds mutex)
+  <- d3d12_resource_create_or_place <- d3d12_transfer_map
+  <- u_default_texture_subdata <- st_TexSubImage <- _mesa_TexImage2D
+
+Move both the proactive reclaim and the out-of-memory retry to
+init_buffer(), where no pb manager lock is held.
+
+Generated-by: LLM
+
+diff --git a/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp b/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
+index 859d65b..e647743 100644
+--- a/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
+@@ -144,16 +144,16 @@ d3d12_bo_new(struct d3d12_screen *screen, uint64_t size, const pb_desc *pb_desc)
+       d3d12_evicted : d3d12_resident;
+ 
+    D3D12_HEAP_PROPERTIES heap_pris = GetCustomHeapProperties(dev, heap_type);
+-   d3d12_screen_reclaim_completed(screen);
+-   HRESULT hres;
+-   do {
+-      hres = dev->CreateCommittedResource(&heap_pris,
+-                                          heap_flags,
+-                                          &res_desc,
+-                                          D3D12_RESOURCE_STATE_COMMON,
+-                                          NULL,
+-                                          IID_PPV_ARGS(&res));
+-   } while (hres == E_OUTOFMEMORY && d3d12_screen_reclaim_one(screen));
++   /* Don't reclaim here: we can be called from within a pb manager that holds
++    * its lock (pb_slab_create), and dropping retired BOs can re-enter that
++    * manager and self-deadlock. init_buffer() reclaims (and retries on OOM)
++    * where no pb manager lock is held. */
++   HRESULT hres = dev->CreateCommittedResource(&heap_pris,
++                                               heap_flags,
++                                               &res_desc,
++                                               D3D12_RESOURCE_STATE_COMMON,
++                                               NULL,
++                                               IID_PPV_ARGS(&res));
+ 
+    if (FAILED(hres))
+       return NULL;
+diff --git a/src/gallium/drivers/d3d12/d3d12_resource.cpp b/src/gallium/drivers/d3d12/d3d12_resource.cpp
+index 09b9764..8c057f1 100644
+--- a/src/gallium/drivers/d3d12/d3d12_resource.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_resource.cpp
+@@ -193,7 +193,10 @@ init_buffer(struct d3d12_screen *screen,
+ 
+    buf_desc.alignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    res->dxgi_format = DXGI_FORMAT_UNKNOWN;
++   d3d12_screen_reclaim_completed(screen);
+    buf = bufmgr->create_buffer(bufmgr, templ->width0, &buf_desc);
++   while (!buf && d3d12_screen_reclaim_one(screen))
++      buf = bufmgr->create_buffer(bufmgr, templ->width0, &buf_desc);
+    if (!buf)
+       return false;
+    res->bo = d3d12_bo_wrap_buffer(screen, buf);

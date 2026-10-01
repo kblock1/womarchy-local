@@ -1,0 +1,12 @@
+# womarchy: keep desktop apps out of the Windows Start menu (see /usr/lib/womarchy/wslg-hide-apps)
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = usr/share/applications/*.desktop
+
+[Action]
+Description = Hiding desktop apps from the Windows Start menu (WSLg)...
+When = PostTransaction
+Exec = /usr/lib/womarchy/wslg-hide-apps

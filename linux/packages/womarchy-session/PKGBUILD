@@ -1,0 +1,28 @@
+# womarchy: session entry point for omarchy.exe (Omarchy on WSL)
+pkgname=womarchy-session
+pkgver=0.1.0
+pkgrel=12
+pkgdesc='Starts the Omarchy desktop session for the omarchy.exe viewer on WSL (Hyprland wsl backend)'
+arch=(any)
+url='https://github.com/sytelus/womarchy'
+license=(MIT)
+depends=(bash gawk hyprland python systemd util-linux wl-clipboard)
+optdepends=('uwsm: start the session the way Omarchy does (recommended)')
+source=(womarchy-session womarchy-clipd womarchy-clipd.service mnt-wslgshm.mount x11-unix womarchy-x11-unix.service)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 womarchy-session "$pkgdir/usr/bin/womarchy-session"
+  install -Dm755 womarchy-clipd "$pkgdir/usr/bin/womarchy-clipd"
+  install -Dm644 womarchy-clipd.service "$pkgdir/usr/lib/systemd/user/womarchy-clipd.service"
+  # started with every graphical session; ConditionEnvironment keeps it to omarchy.exe sessions
+  install -dm755 "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants"
+  ln -s ../womarchy-clipd.service "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/womarchy-clipd.service"
+  install -Dm644 mnt-wslgshm.mount "$pkgdir/usr/lib/systemd/system/mnt-wslgshm.mount"
+  # statically enabled: the unit's conditions make it a no-op without WSLg
+  install -dm755 "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
+  ln -s ../mnt-wslgshm.mount "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/mnt-wslgshm.mount"
+  install -Dm755 x11-unix "$pkgdir/usr/lib/womarchy-session/x11-unix"
+  install -Dm644 womarchy-x11-unix.service "$pkgdir/usr/lib/systemd/system/womarchy-x11-unix.service"
+  ln -s ../womarchy-x11-unix.service "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/womarchy-x11-unix.service"
+}

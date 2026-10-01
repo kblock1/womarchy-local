@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""womarchy-clipd: shares the session's Wayland clipboard with Windows through omarchy.exe (text).
+
+Listens on vsock port WOMARCHY_VSOCK_PORT + 1 for omarchy.exe, which authenticates with WOMARCHY_TOKEN
+(CLIP_HELLO) and then exchanges CLIP_TEXT messages (UTF-8, LF line endings) whenever either clipboard
+changes; see protocol/wdp.h. The Wayland side uses wl-clipboard (data-control, so no focus is needed).
+Runs as the user service womarchy-clipd.service inside the graphical session.
+"""
+import hmac
+import os
+import select
+import socket
+import struct
+import subprocess
+import sys
+
+VERSION = 1
+CLIP_HELLO, CLIP_TEXT = 200, 201
+CLIP_PORT_OFFSET = 1
+MAX_TEXT = 16 << 20
+HEADER = struct.Struct("<II")
+
+
+def log(*args):
+    print("womarchy-clipd:", *args, file=sys.stderr, flush=True)
+
+
+def recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("closed")
+        buf += chunk
+    return bytes(buf)
+
+
+def recv_msg(sock):
+    mtype, size = HEADER.unpack(recv_exact(sock, HEADER.size))
+    if size > MAX_TEXT + 64:
+        raise ConnectionError(f"oversized message ({size} bytes)")
+    return mtype, recv_exact(sock, size)
+
+
+def send_msg(sock, mtype, payload):
+    sock.sendall(HEADER.pack(mtype, len(payload)) + payload)
+
+
+def wayland_text():
+    """Current clipboard text, or None if the clipboard holds no text."""
+    r = subprocess.run(["wl-paste", "--no-newline", "--type", "text"], capture_output=True, timeout=5)
+    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+
+
+def set_wayland_text(text):
+    # wl-copy forks a server that owns the selection until something else is copied
+    subprocess.run(["wl-copy", "--type", "text/plain;charset=utf-8"], input=text.encode("utf-8"), timeout=5)
+
+
+def main():
+    token = bytes.fromhex(os.environ["WOMARCHY_TOKEN"])
+    port = int(os.environ["WOMARCHY_VSOCK_PORT"]) + CLIP_PORT_OFFSET
+
+    server = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+    server.bind((socket.VMADDR_CID_ANY, port))
+    server.listen(1)
+    # one line per clipboard change (the command's output); the text itself is fetched with wl-paste
+    watch = subprocess.Popen(["wl-paste", "--watch", "echo"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    log(f"listening on vsock port {port}")
+
+    client = None
+    last = None  # last text synced in either direction
+    while True:
+        fds = [server, watch.stdout] + ([client] if client else [])
+        ready, _, _ = select.select(fds, [], [])
+
+        if watch.stdout in ready:
+            if not watch.stdout.readline():
+                log("the compositor went away; exiting")  # the session is ending: a normal stop
+                return 0
+            text = wayland_text()
+            if text is not None and text != last and len(text.encode("utf-8")) <= MAX_TEXT:
+                last = text
+                if client:
+                    try:
+                        send_msg(client, CLIP_TEXT, text.encode("utf-8"))
+                    except OSError:
+                        client.close()
+                        client = None
+
+        if server in ready:
+            conn, _ = server.accept()
+            try:
+                conn.settimeout(5)
+                mtype, payload = recv_msg(conn)
+                ok = (mtype == CLIP_HELLO and len(payload) >= 4 + len(token)
+                      and struct.unpack_from("<I", payload)[0] == VERSION
+                      and hmac.compare_digest(payload[4:4 + len(token)], token))
+                conn.settimeout(None)
+            except (OSError, ConnectionError, struct.error):
+                ok = False
+            if not ok:
+                conn.close()
+                continue
+            if client:
+                client.close()
+            client = conn
+            last = None  # the viewer sends Windows' clipboard first; take it
+            log("viewer connected")
+
+        if client and client in ready:
+            try:
+                mtype, payload = recv_msg(client)
+            except (OSError, ConnectionError):
+                client.close()
+                client = None
+                log("viewer disconnected")
+                continue
+            if mtype == CLIP_TEXT:
+                text = payload.decode("utf-8", "replace")
+                if text != last:
+                    last = text
+                    set_wayland_text(text)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        pass

@@ -1,0 +1,25 @@
+# Omarchy tour: desktop, terminal, menus. Screenshots come from inside the session (grim).
+sleep 12000
+shot omarchy/01-desktop.png
+key super+Return
+sleep 4000
+type echo "womarchy: $(uname -r) on $(cat /proc/sys/kernel/hostname)"
+key Return
+sleep 1500
+shot omarchy/02-terminal.png
+key super+space
+sleep 2500
+shot omarchy/03-omarchy-menu.png
+key Escape
+sleep 800
+key super+alt+space
+sleep 2500
+shot omarchy/04-apps-menu.png
+key Escape
+sleep 800
+key super+k
+sleep 2500
+shot omarchy/05-keybindings.png
+key Escape
+sleep 1000
+quit

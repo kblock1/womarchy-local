@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# womarchy-apply-system: WSL-filtered replacement for omarchy-apply-system.
+#
+# Same interface, environment and logging as upstream bin/omarchy-apply-system,
+# but instead of sourcing install/{config,hardware,login,post-install}/all.sh
+# wholesale it walks their run_logged lines through a skip list, then runs the
+# womarchy WSL leaves from /usr/lib/womarchy/wsl/.
+#
+#   womarchy-apply-system --install-user USER [--first-install|--upgrade]
+#   womarchy-apply-system --defer-provisioning --first-install   (image build: no user yet)
+#   womarchy-apply-system --reassert       (WSL leaves only; used by update hooks)
+#   womarchy-apply-system --list           (print the plan, run nothing)
+#
+# Policy (docs/research/01-omarchy.md §7, §10.5):
+#   config/, post-install/  default-allow, minus WOMARCHY_SKIP
+#   hardware/, login/       default-deny (nothing in them applies to WSL)
+# Extra skips/opt-ins: WOMARCHY_SKIP_EXTRA="config/foo.sh ..." and
+# WOMARCHY_FIREWALL=1 (runs config/firewall.sh, i.e. ufw).
+
+set -euo pipefail
+
+usage() { sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//'; }
+
+install_user="${OMARCHY_INSTALL_USER:-}"
+first_install=0 upgrade=0 defer_provisioning=0 reassert=0 list_only=0
+
+while (($#)); do
+  case "$1" in
+    --install-user) install_user="${2:-}"; shift 2 ;;
+    --defer-provisioning) defer_provisioning=1; shift ;;
+    --first-install) first_install=1; shift ;;
+    --upgrade) upgrade=1; shift ;;
+    --reassert) reassert=1; shift ;;
+    --list) list_only=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
+export OMARCHY_INSTALL="${OMARCHY_INSTALL:-$OMARCHY_PATH/install}"
+export WOMARCHY_LIB="${WOMARCHY_LIB:-/usr/lib/womarchy}"
+export OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
+
+# Upstream leaves skipped under WSL. Everything else in config/ and
+# post-install/ runs; a new upstream leaf is picked up automatically (the CI
+# audit flags it for classification).
+WOMARCHY_SKIP=(
+  config/snapper.sh          # no btrfs; snapper is provided (not installed) by womarchy-compat
+  config/enable-services.sh  # replaced by wsl/enable-services.sh
+  config/firewall.sh         # Hyper-V firewall + WSL NAT already gate inbound; opt-in below
+)
+[[ ${WOMARCHY_FIREWALL:-0} == 1 ]] && WOMARCHY_SKIP=("${WOMARCHY_SKIP[@]/config\/firewall.sh}")
+read -r -a _extra <<<"${WOMARCHY_SKIP_EXTRA:-}"
+WOMARCHY_SKIP+=("${_extra[@]}")
+
+# WSL leaves, in order. pacman.sh must follow post-install/pacman.sh, which
+# rewrites /etc/pacman.conf from Omarchy's template.
+WSL_LEAVES=(binfmt.sh pacman.sh enable-services.sh gpu.sh audio.sh keyboard-locale.sh docker-dns.sh shm-mount.sh
+            wslg-apps.sh)
+
+skipped() {
+  local leaf="$1" s
+  case $leaf in hardware/*|login/*) return 0 ;; esac
+  for s in "${WOMARCHY_SKIP[@]}"; do [[ -n $s && $leaf == "$s" ]] && return 0; done
+  return 1
+}
+
+# Yield the leaf paths (relative to $OMARCHY_INSTALL) that an all.sh would run.
+leaves_of() {
+  local line
+  [[ -f $OMARCHY_INSTALL/$1/all.sh ]] || return 0
+  while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*run_logged[[:space:]]+\"?\$OMARCHY_INSTALL/([^\"[:space:]]+)\"? ]] && echo "${BASH_REMATCH[1]}"
+  done <"$OMARCHY_INSTALL/$1/all.sh"
+}
+
+if (( list_only )); then
+  for phase in config hardware login post-install; do
+    while read -r leaf; do
+      if skipped "$leaf"; then echo "skip  $leaf"; else echo "run   $leaf"; fi
+    done < <(leaves_of "$phase")
+  done
+  for leaf in "${WSL_LEAVES[@]}"; do echo "run   wsl/$leaf"; done
+  exit 0
+fi
+
+if (( EUID != 0 )); then
+  echo "Error: womarchy-apply-system must run as root" >&2
+  exit 1
+fi
+
+if (( ! reassert )); then
+  if (( defer_provisioning )); then
+    install_user=""
+  elif [[ -z $install_user || $install_user == root ]]; then
+    echo "Error: --install-user must name the target non-root user (or use --defer-provisioning)" >&2
+    exit 1
+  elif ! getent passwd "$install_user" >/dev/null; then
+    echo "Error: user '$install_user' does not exist" >&2
+    exit 1
+  fi
+fi
+
+export OMARCHY_INSTALL_USER="$install_user"
+export OMARCHY_FIRST_INSTALL="$first_install"
+export OMARCHY_UPGRADE="$upgrade"
+export OMARCHY_INSTALL_LOG_FILE="${OMARCHY_INSTALL_LOG_FILE:-/var/log/omarchy-install.log}"
+export PATH="$OMARCHY_PATH/bin:$PATH"
+
+source "$OMARCHY_INSTALL/helpers/logging.sh"
+start_install_log
+
+failed=()
+run_leaf() {
+  # Like upstream, a failing leaf is logged; unlike upstream (set -e aborts the
+  # whole apply), we finish the remaining leaves and report at the end.
+  run_logged "$1" || failed+=("${1#"$OMARCHY_INSTALL/"}")
+}
+
+if (( ! reassert )); then
+  for phase in config hardware login post-install; do
+    while read -r leaf; do
+      if skipped "$leaf"; then
+        omarchy_log_line "[$(date '+%Y-%m-%d %H:%M:%S')] Skipped (womarchy): $OMARCHY_INSTALL/$leaf"
+      else
+        run_leaf "$OMARCHY_INSTALL/$leaf"
+      fi
+    done < <(leaves_of "$phase")
+  done
+fi
+
+for leaf in "${WSL_LEAVES[@]}"; do
+  run_leaf "$WOMARCHY_LIB/wsl/$leaf"
+done
+
+stop_install_log
+
+if ((${#failed[@]})); then
+  echo "womarchy-apply-system: failed leaves: ${failed[*]} (see $OMARCHY_INSTALL_LOG_FILE)" >&2
+  exit 1
+fi

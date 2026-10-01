@@ -1,0 +1,267 @@
+diff --git a/src/output/Monitor.cpp b/src/output/Monitor.cpp
+index e69d8dd..c01ff62 100644
+--- a/src/output/Monitor.cpp
++++ b/src/output/Monitor.cpp
+@@ -213,6 +213,8 @@ void CMonitor::onConnect(bool noRule) {
+     });
+ 
+     m_listeners.state = m_output->events.state.listen([this](const Aquamarine::IOutput::SStateEvent& event) {
++        Log::logger->log(Log::DEBUG, "Output {} state event: size {}, createdByUser {}, rule resolution {}", m_name, event.size, m_createdByUser,
++                         m_activeMonitorRule.m_resolution);
+         if (event.size == Vector2D{}) {
+             // an indication to re-set state
+             // we can't do much for createdByUser displays I think
+@@ -2644,6 +2646,8 @@ void CMonitorState::ensureBufferPresent() {
+     if (STATE.buffer) {
+         if (const auto params = STATE.buffer->dmabuf(); params.success && params.format == m_owner->m_drmFormat)
+             return;
++        if (STATE.buffer->shm().success)
++            return;
+     }
+ 
+     // this is required for modesetting being possible and might be missing in case of first tests in the renderer
+diff --git a/src/render/GLRenderer.cpp b/src/render/GLRenderer.cpp
+index 1dab5a0..50d425a 100644
+--- a/src/render/GLRenderer.cpp
++++ b/src/render/GLRenderer.cpp
+@@ -105,8 +105,13 @@ void CHyprGLRenderer::endRender(const std::function<void()>& renderingDoneCallba
+     if (m_renderMode == RENDER_MODE_FULL_FAKE)
+         return;
+ 
+-    if (m_renderMode == RENDER_MODE_NORMAL)
++    if (m_renderMode == RENDER_MODE_NORMAL) {
++        // CPU (shm) output buffers can't be rendered to directly; copy the updated pixels over
++        if (m_currentRenderbuffer)
++            m_currentRenderbuffer->readbackToBuffer(g_pHyprRenderer->m_renderData.damage);
++
+         PMONITOR->m_output->state->setBuffer(m_currentBuffer);
++    }
+ 
+     if (!explicitSyncSupported()) {
+         Log::logger->log(Log::TRACE, "renderer: Explicit sync unsupported, falling back to implicit in endRender");
+diff --git a/src/render/OpenGL.cpp b/src/render/OpenGL.cpp
+index baee1ad..bc50fb8 100644
+--- a/src/render/OpenGL.cpp
++++ b/src/render/OpenGL.cpp
+@@ -149,7 +149,7 @@ static ShaderFeatureFlags globalFeatures() {
+         0;
+ }
+ 
+-void CHyprOpenGLImpl::initEGL(bool gbm) {
++void CHyprOpenGLImpl::initEGL(eEGLPlatform platform) {
+     std::vector<EGLint> attrs;
+     if (m_exts.KHR_display_reference) {
+         attrs.push_back(EGL_TRACK_REFERENCES_KHR);
+@@ -158,7 +158,14 @@ void CHyprOpenGLImpl::initEGL(bool gbm) {
+ 
+     attrs.push_back(EGL_NONE);
+ 
+-    m_eglDisplay = m_proc.eglGetPlatformDisplayEXT(gbm ? EGL_PLATFORM_GBM_KHR : EGL_PLATFORM_DEVICE_EXT, gbm ? m_gbmDevice : m_eglDevice, attrs.data());
++    switch (platform) {
++        case EGL_PLATFORM_KIND_GBM: m_eglDisplay = m_proc.eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, m_gbmDevice, attrs.data()); break;
++        case EGL_PLATFORM_KIND_SURFACELESS:
++            m_eglDisplay = m_proc.eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, attrs.data());
++            break;
++        case EGL_PLATFORM_KIND_DEVICE:
++        default: m_eglDisplay = m_proc.eglGetPlatformDisplayEXT(EGL_PLATFORM_DEVICE_EXT, m_eglDevice, attrs.data()); break;
++    }
+     if (m_eglDisplay == EGL_NO_DISPLAY)
+         RASSERT(false, "EGL: failed to create a platform display");
+ 
+@@ -330,12 +337,20 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
+     RASSERT(eglBindAPI(EGL_OPENGL_ES_API) != EGL_FALSE, "Couldn't bind to EGL's opengl ES API. This means your gpu driver f'd up. This is not a hyprland issue.");
+ 
+     bool success = false;
+-    if (EGLEXTENSIONS.contains("EXT_platform_device") || !m_proc.eglQueryDevicesEXT || !m_proc.eglQueryDeviceStringEXT) {
++    if (m_drmFD < 0) {
++        // No DRM device (e.g. WSL2): render on Mesa's surfaceless platform, which picks the
++        // software-winsys loader and thus any GPU driver that doesn't need a DRM node (d3d12).
++        // Output buffers are then CPU buffers that we read back into.
++        RASSERT(EGLEXTENSIONS.contains("EGL_MESA_platform_surfaceless"), "No DRM device and EGL_MESA_platform_surfaceless is unsupported, cannot render.");
++        Log::logger->log(Log::DEBUG, "EGL: no DRM device, using the surfaceless platform");
++        success = true;
++        initEGL(EGL_PLATFORM_KIND_SURFACELESS);
++    } else if (EGLEXTENSIONS.contains("EXT_platform_device") || !m_proc.eglQueryDevicesEXT || !m_proc.eglQueryDeviceStringEXT) {
+         m_eglDevice = eglDeviceFromDRMFD(m_drmFD);
+ 
+         if (m_eglDevice != EGL_NO_DEVICE_EXT) {
+             success = true;
+-            initEGL(false);
++            initEGL(EGL_PLATFORM_KIND_DEVICE);
+         }
+     }
+ 
+@@ -351,7 +366,7 @@ CHyprOpenGLImpl::CHyprOpenGLImpl() : m_drmFD(g_pCompositor->m_drmRenderNode.fd >
+             if (!m_gbmDevice)
+                 RASSERT(false, "Couldn't open a gbm device");
+ 
+-            initEGL(true);
++            initEGL(EGL_PLATFORM_KIND_GBM);
+         }
+     }
+ 
+diff --git a/src/render/OpenGL.hpp b/src/render/OpenGL.hpp
+index fc0e345..582a960 100644
+--- a/src/render/OpenGL.hpp
++++ b/src/render/OpenGL.hpp
+@@ -326,7 +326,13 @@ namespace Render::GL {
+         GLuint                           m_currentProgram;
+ 
+         void                             initDRMFormats();
+-        void                             initEGL(bool gbm);
++        enum eEGLPlatform : uint8_t {
++            EGL_PLATFORM_KIND_DEVICE = 0,
++            EGL_PLATFORM_KIND_GBM,
++            EGL_PLATFORM_KIND_SURFACELESS, // no DRM device at all (e.g. WSL2 via Mesa d3d12)
++        };
++
++        void                             initEGL(eEGLPlatform platform);
+         EGLDeviceEXT                     eglDeviceFromDRMFD(int drmFD);
+ 
+         // for the final shader
+diff --git a/src/render/Renderbuffer.cpp b/src/render/Renderbuffer.cpp
+index 34ce3e6..270cc9e 100644
+--- a/src/render/Renderbuffer.cpp
++++ b/src/render/Renderbuffer.cpp
+@@ -20,3 +20,7 @@ bool IRenderbuffer::good() {
+ SP<IFramebuffer> IRenderbuffer::getFB() {
+     return m_framebuffer;
+ }
++
++void IRenderbuffer::readbackToBuffer(const CRegion& damage) {
++    ;
++}
+diff --git a/src/render/Renderbuffer.hpp b/src/render/Renderbuffer.hpp
+index e19af22..11c16f5 100644
+--- a/src/render/Renderbuffer.hpp
++++ b/src/render/Renderbuffer.hpp
+@@ -17,6 +17,9 @@ namespace Render {
+         virtual void            bind()   = 0;
+         virtual void            unbind() = 0;
+ 
++        // CPU-backed (shm) output buffers: copy the rendered pixels in `damage` into the buffer's memory.
++        virtual void readbackToBuffer(const CRegion& damage);
++
+         WP<Aquamarine::IBuffer> m_hlBuffer;
+ 
+       protected:
+diff --git a/src/render/gl/GLRenderbuffer.cpp b/src/render/gl/GLRenderbuffer.cpp
+index 794d035..cbc6180 100644
+--- a/src/render/gl/GLRenderbuffer.cpp
++++ b/src/render/gl/GLRenderbuffer.cpp
+@@ -10,6 +10,7 @@
+ #include <hyprutils/signal/Signal.hpp>
+ 
+ #include <dlfcn.h>
++#include <hyprgraphics/egl/Egl.hpp>
+ 
+ using namespace Render::GL;
+ 
+@@ -34,6 +35,11 @@ CGLRenderbuffer::~CGLRenderbuffer() {
+ CGLRenderbuffer::CGLRenderbuffer(SP<Aquamarine::IBuffer> buffer, uint32_t format) : IRenderbuffer(buffer, format) {
+     auto dma = buffer->dmabuf();
+ 
++    if (!dma.success && buffer->shm().success) {
++        initShm(buffer);
++        return;
++    }
++
+     m_image = g_pHyprOpenGL->createEGLImage(dma);
+     if (m_image == EGL_NO_IMAGE_KHR) {
+         Log::logger->log(Log::ERR, "rb: createEGLImage failed");
+@@ -73,3 +79,77 @@ void CGLRenderbuffer::bind() {
+ void CGLRenderbuffer::unbind() {
+     GLFB(m_framebuffer)->unbind();
+ }
++
++void CGLRenderbuffer::initShm(SP<Aquamarine::IBuffer> buffer) {
++    // No way to import a CPU buffer as a render target: render into a GPU texture instead and
++    // read the damaged pixels back into the buffer after every frame (see readbackToBuffer).
++    const auto shm = buffer->shm();
++
++    m_shm         = true;
++    m_framebuffer = makeShared<CGLFramebuffer>("shm output buffer");
++    if (!m_framebuffer->alloc(shm.size.x, shm.size.y, shm.format)) {
++        Log::logger->log(Log::ERR, "rb: failed to allocate a framebuffer for a shm buffer");
++        return;
++    }
++
++    m_listeners.destroyBuffer = buffer->events.destroy.listen([this] { g_pHyprRenderer->onRenderbufferDestroy(this); });
++
++    m_good = true;
++}
++
++void CGLRenderbuffer::readbackToBuffer(const CRegion& damage) {
++    if (!m_shm || !m_good)
++        return;
++
++    const auto buffer = m_hlBuffer.lock();
++    if (!buffer)
++        return;
++
++    const auto shm                = buffer->shm();
++    auto [pixelData, fmt, bufLen] = buffer->beginDataPtr(0);
++    const auto PFORMAT            = Hyprgraphics::Egl::getPixelFormatFromDRM(shm.format);
++    if (!pixelData || !PFORMAT || shm.stride <= 0)
++        return;
++
++    CRegion region = damage.copy().intersect(CBox{{}, shm.size});
++    if (region.empty())
++        return;
++
++    // every glReadPixels is a GPU sync point with a fixed cost; don't pay it per tiny rect
++    if (region.getRects().size() > 4)
++        region = CRegion{region.getExtents()};
++
++    // same format selection as CGLFramebuffer::readPixels
++    static auto stripSwizzleAlpha = [](std::array<GLint, 4> arr) {
++        arr[3] = GL_ONE;
++        return arr;
++    };
++
++    int glFormat = PFORMAT->glFormat;
++    if (PFORMAT->swizzle.has_value()) {
++        if (stripSwizzleAlpha(*PFORMAT->swizzle) == stripSwizzleAlpha(Hyprgraphics::Egl::SWIZZLE_BGRA))
++            glFormat = GL_BGRA_EXT;
++        else
++            glFormat = GL_RGBA;
++    } else if (glFormat == GL_RGBA)
++        glFormat = GL_BGRA_EXT;
++
++    g_pHyprOpenGL->makeEGLCurrent();
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, GLFB(m_framebuffer)->getFBID());
++    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++    glPixelStorei(GL_PACK_ROW_LENGTH, shm.stride / 4);
++
++    region.forEachRect([&](const auto& rect) {
++        const int w = rect.x2 - rect.x1;
++        const int h = rect.y2 - rect.y1;
++        if (w <= 0 || h <= 0)
++            return;
++
++        glReadPixels(rect.x1, rect.y1, w, h, glFormat, PFORMAT->glType, pixelData + sc<size_t>(rect.y1) * shm.stride + sc<size_t>(rect.x1) * 4);
++    });
++
++    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++    glPixelStorei(GL_PACK_ALIGNMENT, 4);
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++    buffer->endDataPtr();
++}
+diff --git a/src/render/gl/GLRenderbuffer.hpp b/src/render/gl/GLRenderbuffer.hpp
+index 4e60431..6f34bf7 100644
+--- a/src/render/gl/GLRenderbuffer.hpp
++++ b/src/render/gl/GLRenderbuffer.hpp
+@@ -12,9 +12,13 @@ namespace Render::GL {
+ 
+         void bind() override;
+         void unbind() override;
++        void readbackToBuffer(const CRegion& damage) override;
+ 
+       private:
++        void   initShm(SP<Aquamarine::IBuffer> buffer);
++
+         void*  m_image = nullptr;
+         GLuint m_rbo   = 0;
++        bool   m_shm   = false;
+     };
+ }

@@ -1,0 +1,22 @@
+# womarchy (Omarchy on WSL) session environment, sourced by uwsm before Hyprland
+# starts (after Omarchy's /usr/share/uwsm/env.d/10-omarchy). Managed by
+# womarchy-provision-user; put personal additions in another env.d file.
+
+# GPU: Mesa's d3d12 driver on the host GPU (Arch Mesa defaults to llvmpipe).
+export GALLIUM_DRIVER="${GALLIUM_DRIVER:-d3d12}"
+# GTK4: GL renderer; its Vulkan path would run on the non-conformant Dozen driver.
+export GSK_RENDERER="${GSK_RENDERER:-ngl}"
+
+# Audio: WSL points PULSE_SERVER at WSLg's server. Inside the desktop, go through
+# PipeWire instead (it tunnels to WSLg), so pactl/wpctl, the Quickshell audio
+# panel and apps all share one graph and one volume.
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
+fi
+
+# WSL fallbacks for tools of hardware WSL lacks (e.g. nm-online, so Omarchy's
+# first run does not ask to set up Wi-Fi). Appended: real tools always win.
+case ":$PATH:" in
+  *:/usr/lib/womarchy/bin:*) ;;
+  *) export PATH="$PATH:/usr/lib/womarchy/bin" ;;
+esac

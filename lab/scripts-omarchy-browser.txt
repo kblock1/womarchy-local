@@ -1,0 +1,15 @@
+# Omarchy browser (Chromium): open it, load chrome://gpu, screenshot
+sleep 9000
+key super+shift+Return
+sleep 9000
+key ctrl+l
+type chrome://gpu
+key Return
+sleep 4000
+shot omarchy/10-chromium-gpu.png
+key ctrl+l
+type https://example.com
+key Return
+sleep 5000
+shot omarchy/11-chromium-web.png
+quit

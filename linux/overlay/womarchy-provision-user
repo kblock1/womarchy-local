@@ -1,0 +1,177 @@
+#!/bin/bash
+
+# womarchy-provision-user: per-user setup for Omarchy on WSL.
+#
+#   womarchy-provision-user [--force] [--overlay-only]
+#
+# 1. Runs upstream `omarchy-provision-user --first-install` unmodified, with
+#    OMARCHY_SETUP_CONTEXT=wsl (headless theme set; Node via the network rather
+#    than the ISO's bundled tarball). Pass OMARCHY_USER_NAME/OMARCHY_USER_EMAIL
+#    for git and XCompose.
+# 2. Applies the WSL user overlay from /usr/lib/womarchy/user:
+#    hypr bindings (Super+L, Ctrl+Alt+Del), monitors from Windows, uwsm env,
+#    shell.json (no idle lock, no Wi-Fi/Bluetooth/power widgets), Omarchy menu
+#    (no suspend/hibernate/firmware/Wi-Fi/Bluetooth; Shutdown returns to
+#    Windows), update hooks that reassert WSL invariants, the lite profile, and
+#    re-enabled animations when the GPU path works.
+# Idempotent. Marker: ~/.local/state/womarchy/provisioned
+
+set -euo pipefail
+
+force=0 overlay_only=0
+while (($#)); do
+  case "$1" in
+    --force) force=1; shift ;;
+    --overlay-only) overlay_only=1; shift ;;
+    -h|--help) sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+if (( EUID == 0 )); then
+  echo "Error: run womarchy-provision-user as the user being configured, not as root." >&2
+  exit 1
+fi
+
+export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
+export OMARCHY_SETUP_CONTEXT="${OMARCHY_SETUP_CONTEXT:-wsl}"
+export PATH="$OMARCHY_PATH/bin:$PATH"
+WOMARCHY_LIB="${WOMARCHY_LIB:-/usr/lib/womarchy}"
+state="$HOME/.local/state/womarchy"
+mkdir -p "$state"
+
+if [[ -f $state/provisioned ]] && (( ! force )); then
+  echo "womarchy user setup already complete (rerun with --force to refresh)."
+  exit 0
+fi
+
+log() { printf '\e[32m==>\e[0m %s\n' "$*"; }
+warn() { printf '\e[33mwarning:\e[0m %s\n' "$*" >&2; }
+
+upstream_failed=0
+if (( ! overlay_only )); then
+  log "Running Omarchy user provisioning (omarchy-provision-user --first-install)"
+  # run_logged output goes to this log unless OMARCHY_LOG_TO_STDOUT=1.
+  export OMARCHY_INSTALL_LOG_FILE="${OMARCHY_INSTALL_LOG_FILE:-$state/provision-user.log}"
+  if ! omarchy-provision-user --first-install; then
+    upstream_failed=1
+    warn "omarchy-provision-user failed (see $OMARCHY_INSTALL_LOG_FILE); applying the WSL overlay anyway"
+  fi
+fi
+
+src="$WOMARCHY_LIB/user"
+cfg="$HOME/.config"
+
+# --- Hyprland ----------------------------------------------------------------
+log "Applying Hyprland overrides"
+install -D -m 0644 "$src/hypr/womarchy.lua" "$cfg/hypr/womarchy.lua"
+bindings="$cfg/hypr/bindings.lua"
+touch "$bindings"
+if ! grep -q 'require("hypr.womarchy")' "$bindings"; then
+  cat >>"$bindings" <<'EOF'
+
+-- womarchy (WSL): move bindings Windows reserves (Super+L, Ctrl+Alt+Del).
+-- See ~/.config/hypr/womarchy.lua. Your own bindings can follow.
+require("hypr.womarchy")
+EOF
+fi
+monitors="$cfg/hypr/monitors.lua"
+if [[ -f $monitors ]] && ! grep -q 'womarchy/monitors.lua' "$monitors"; then
+  cp -f "$monitors" "$monitors.omarchy-default"
+fi
+if ! grep -qs 'womarchy/monitors.lua' "$monitors"; then
+  install -D -m 0644 "$src/hypr/monitors.lua" "$monitors"
+fi
+
+# --- uwsm session environment ---------------------------------------------------
+install -D -m 0644 "$src/uwsm/env.d/10-womarchy" "$cfg/uwsm/env.d/10-womarchy"
+
+# --- Omarchy shell (Quickshell) ---------------------------------------------------
+# No deep-merge in shell.json, so edit the user's copy in place: drop widgets
+# for hardware WSL does not have and disable the idle service (screensaver +
+# lock; the Windows lock covers the session). Manual lock still works.
+shell_json="$cfg/omarchy/shell.json"
+if [[ ! -f $shell_json && -f $OMARCHY_PATH/config/omarchy/shell.json ]]; then
+  install -D -m 0644 "$OMARCHY_PATH/config/omarchy/shell.json" "$shell_json"
+fi
+if [[ -f $shell_json ]]; then
+  log "Adjusting ~/.config/omarchy/shell.json"
+  tmp=$(mktemp)
+  jq '
+    def drop: ["omarchy.bluetooth", "omarchy.network", "omarchy.power", "omarchy.battery"];
+    (if (.bar.layout | type) == "object"
+     then .bar.layout |= with_entries(.value |= (if type == "array"
+            then map(select(((.id // "") as $i | drop | index($i)) | not)) else . end))
+     else . end)
+    | .disabledPlugins = (((.disabledPlugins // []) + ["omarchy.idle", "omarchy.battery"]) | unique)
+  ' "$shell_json" >"$tmp" && install -m 0644 "$tmp" "$shell_json"
+  rm -f "$tmp"
+else
+  warn "no shell.json found; skipped shell adjustments"
+fi
+
+# --- Omarchy menu ---------------------------------------------------------------
+# A row in the user extension replaces the whole default row (v4.0.x merge), so
+# build full rows from the installed default menu: hidden ones get
+# "when":"false"; Shutdown becomes "log out", which returns to the Windows prompt.
+menu_ext="$cfg/omarchy/extensions/omarchy-menu.jsonc"
+default_menu="$OMARCHY_PATH/default/omarchy/omarchy-menu.jsonc"
+if [[ -f $menu_ext ]] && ! grep -q '^// womarchy-managed' "$menu_ext" &&
+   perl -0pe 's{^\s*//[^\n]*(\n|$)}{}mg' "$menu_ext" | grep -q '"'; then
+  warn "$menu_ext has your own entries; not replacing it (see $WOMARCHY_LIB/user for womarchy's rows)"
+elif [[ -f $default_menu ]]; then
+  log "Writing the WSL Omarchy menu overlay"
+  hide='^(system\.(suspend|hibernate|reboot)|update\.firmware|update\.hardware\.(wifi|bluetooth|trackpad)|update\.password\.drive|update\.config\.plymouth|style\.unlock|setup\.direct-boot|setup\.network(\..*)?|trigger\.toggle\.(idle-lock|battery-percentage))$'
+  rows=$(perl -0pe 's{^\s*//[^\n]*(\n|$)}{}mg; s/,(\s*[}\]])/$1/g' "$default_menu" | jq --arg hide "$hide" '
+    (if has("items") then .items else . end) as $m
+    | ($m | with_entries(select(.key | test($hide))) | map_values(. + {when: "false"}))
+      + { "system.logout": (($m["system.logout"] // {label: "Logout"}) + {action: "omarchy-system-logout",
+            description: "Close all apps and return to the Windows prompt"}),
+          "system.shutdown": (($m["system.shutdown"] // {label: "Shutdown"}) + {action: "omarchy-system-logout",
+            description: "Close all apps and return to Windows (the WSL distro keeps running)"}) }')
+  mkdir -p "$(dirname "$menu_ext")"
+  {
+    echo "// womarchy-managed: Omarchy menu overrides for WSL, regenerated by womarchy-provision-user."
+    echo "// Remove the first line to take ownership of this file. Rows merge over Omarchy's"
+    echo "// default menu by id and replace the whole row; \"when\": \"false\" hides one."
+    echo "$rows"
+  } >"$menu_ext"
+else
+  warn "default menu $default_menu not found; skipped menu overlay"
+fi
+
+# --- Update hooks -----------------------------------------------------------------
+for hook in post-update.d/10-womarchy pre-refresh-pacman.d/10-womarchy; do
+  install -D -m 0755 "$src/omarchy/hooks/$hook" "$cfg/omarchy/hooks/$hook"
+done
+
+# --- Lite profile ------------------------------------------------------------------
+# The image was built without the heavy preinstalled apps: hide their bindings.
+if grep -qs '^WOMARCHY_PROFILE=lite' /etc/womarchy/profile; then
+  mkdir -p "$HOME/.local/state/omarchy"
+  touch "$HOME/.local/state/omarchy/preinstalls-removed"
+fi
+
+# --- Animations ----------------------------------------------------------------------
+# Omarchy (after v4.0.4) turns animations/blur off in VMs because it assumes
+# software rendering. On WSL with the d3d12 GPU path they are cheap: remove that
+# toggle when the GPU is really used, and leave a flag saying we did.
+noanim="$HOME/.local/state/omarchy/toggles/hypr/no-animations.lua"
+if [[ -f $noanim ]]; then
+  if [[ -e /dev/dxg ]] && command -v eglinfo >/dev/null &&
+     GALLIUM_DRIVER=d3d12 eglinfo -B -p surfaceless 2>/dev/null | grep -q 'D3D12'; then
+    mv -f "$noanim" "$state/no-animations.lua.removed"
+    echo "removed $noanim on $(date -Is): d3d12 GPU rendering available" >"$state/animations-reenabled"
+    log "Re-enabled animations (GPU rendering via D3D12 available)"
+  else
+    echo "kept $noanim on $(date -Is): no d3d12 GPU rendering" >"$state/animations-kept-off"
+  fi
+fi
+
+if (( upstream_failed )); then
+  warn "Omarchy's own user provisioning did not finish; rerun: womarchy-provision-user --force"
+  exit 1
+fi
+
+date -Is >"$state/provisioned"
+log "womarchy user setup complete."

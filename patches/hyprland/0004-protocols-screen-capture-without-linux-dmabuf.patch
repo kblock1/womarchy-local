@@ -1,0 +1,96 @@
+diff --git a/src/protocols/ImageCopyCapture.cpp b/src/protocols/ImageCopyCapture.cpp
+index 20d990b..f710462 100644
+--- a/src/protocols/ImageCopyCapture.cpp
++++ b/src/protocols/ImageCopyCapture.cpp
+@@ -70,6 +70,8 @@ void CImageCopyCaptureSession::sendConstraints() {
+ 
+     for (DRMFormat format : formats) {
+         m_resource->sendShmFormat(NFormatUtils::drmToShm(format));
++        if (!PROTO::linuxDma)
++            continue;
+ 
+         auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
+ 
+@@ -81,12 +83,15 @@ void CImageCopyCaptureSession::sendConstraints() {
+         wl_array_release(&modsArr);
+     }
+ 
+-    dev_t           device    = PROTO::linuxDma->getMainDevice();
+-    struct wl_array deviceArr = {
+-        .size = sizeof(device),
+-        .data = sc<void*>(&device),
+-    };
+-    m_resource->sendDmabufDevice(&deviceArr);
++    // no linux-dmabuf without a DRM device (e.g. the WSL backend): offer shm only
++    if (PROTO::linuxDma) {
++        dev_t           device    = PROTO::linuxDma->getMainDevice();
++        struct wl_array deviceArr = {
++            .size = sizeof(device),
++            .data = sc<void*>(&device),
++        };
++        m_resource->sendDmabufDevice(&deviceArr);
++    }
+ 
+     m_bufferSize = m_session->bufferSize();
+     m_resource->sendBufferSize(m_bufferSize.x, m_bufferSize.y);
+@@ -282,21 +287,26 @@ void CImageCopyCaptureCursorSession::sendConstraints() {
+ 
+     m_sessionResource->sendShmFormat(NFormatUtils::drmToShm(format));
+ 
+-    auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
+-
+-    wl_array modsArr;
+-    wl_array_init(&modsArr);
+-    if (const auto PMODIFIERS = sc<uint64_t*>(wl_array_add(&modsArr, modifiers.size() * sizeof(uint64_t))))
+-        std::ranges::copy(modifiers, PMODIFIERS);
+-    m_sessionResource->sendDmabufFormat(format, &modsArr);
+-    wl_array_release(&modsArr);
+-
+-    dev_t           device    = PROTO::linuxDma->getMainDevice();
+-    struct wl_array deviceArr = {
+-        .size = sizeof(device),
+-        .data = sc<void*>(&device),
+-    };
+-    m_sessionResource->sendDmabufDevice(&deviceArr);
++    if (PROTO::linuxDma) {
++        auto     modifiers = g_pHyprRenderer->getDRMFormatModifiers(format);
++
++        wl_array modsArr;
++        wl_array_init(&modsArr);
++        if (const auto PMODIFIERS = sc<uint64_t*>(wl_array_add(&modsArr, modifiers.size() * sizeof(uint64_t))))
++            std::ranges::copy(modifiers, PMODIFIERS);
++        m_sessionResource->sendDmabufFormat(format, &modsArr);
++        wl_array_release(&modsArr);
++    }
++
++    // no linux-dmabuf without a DRM device (e.g. the WSL backend): offer shm only
++    if (PROTO::linuxDma) {
++        dev_t           device    = PROTO::linuxDma->getMainDevice();
++        struct wl_array deviceArr = {
++            .size = sizeof(device),
++            .data = sc<void*>(&device),
++        };
++        m_sessionResource->sendDmabufDevice(&deviceArr);
++    }
+ 
+     m_bufferSize = m_session->bufferSize();
+     m_sessionResource->sendBufferSize(m_bufferSize.x, m_bufferSize.y);
+diff --git a/src/protocols/Screencopy.cpp b/src/protocols/Screencopy.cpp
+index 75c2302..924cd11 100644
+--- a/src/protocols/Screencopy.cpp
++++ b/src/protocols/Screencopy.cpp
+@@ -1,4 +1,5 @@
+ #include "Screencopy.hpp"
++#include "LinuxDMABUF.hpp"
+ #include "../managers/screenshare/ScreenshareManager.hpp"
+ #include "core/Output.hpp"
+ #include "../render/Renderer.hpp"
+@@ -88,7 +89,7 @@ CScreencopyFrame::CScreencopyFrame(SP<CZwlrScreencopyFrameV1> resource_, WP<CScr
+     m_resource->sendBuffer(NFormatUtils::drmToShm(format), bufSize.x, bufSize.y, stride);
+ 
+     if (m_resource->version() >= 3) {
+-        if LIKELY (format != DRM_FORMAT_INVALID)
++        if LIKELY (format != DRM_FORMAT_INVALID && PROTO::linuxDma)
+             m_resource->sendLinuxDmabuf(format, bufSize.x, bufSize.y);
+ 
+         m_resource->sendBufferDone();

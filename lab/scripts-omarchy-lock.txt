@@ -1,0 +1,13 @@
+sleep 9000
+key super+Escape
+sleep 2000
+key Down
+sleep 300
+key Return
+sleep 3000
+shot omarchy/40-locked.png
+type omarchy
+key Return
+sleep 3000
+shot omarchy/41-unlocked.png
+quit

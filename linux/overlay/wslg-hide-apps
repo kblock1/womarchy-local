@@ -1,0 +1,75 @@
+#!/bin/bash
+# womarchy: keep Omarchy's apps out of the Windows Start menu.
+#
+# WSLg publishes every desktop entry of the distro as a Windows Start-menu
+# shortcut "Name (distro)" that starts the app in its own WSLg window, outside
+# the Omarchy desktop. WSLg's app list (weston rdprail-shell app-list.c) scans
+# /usr/share/applications, then /usr/local/share/applications, keyed by file
+# name, and skips entries with Hidden/NoDisplay/Terminal=true or ANY
+# OnlyShowIn. So for each entry WSLg would show, this writes a copy to
+# /usr/local/share/applications with "OnlyShowIn=Hyprland;": WSLg drops it,
+# while the Omarchy session (XDG_CURRENT_DESKTOP=Hyprland; /usr/local/share
+# comes first in XDG_DATA_DIRS) still lists it.
+#
+# Run by the pacman hook 90-womarchy-wslg-apps.hook on every transaction that
+# touches usr/share/applications (rewriting all overrides also re-hides entries
+# WSLg re-added when their package updated). Only files carrying the marker
+# below are ever changed or removed. Opt out: touch /etc/womarchy/wslg-show-apps,
+# run this script, then `wsl --terminate <distro>` (WSLg treats a deleted
+# override as a deleted app until it rescans at the next start).
+set -euo pipefail
+
+SRC=/usr/share/applications
+DST=/usr/local/share/applications
+MARK='# womarchy-generated: hides this app from the Windows Start menu (wslg-hide-apps)'
+show_all=0
+[[ -e /etc/womarchy/wslg-show-apps ]] && show_all=1
+
+ours() { [[ -f $1 ]] && head -n1 "$1" | grep -qxF "$MARK"; }
+
+# Exit 0 when WSLg would publish the entry (mirrors app-list.c's filters).
+wslg_shows() {
+  awk -F= '
+    /^\[/ { group = $0; next }
+    group != "[Desktop Entry]" { next }
+    $1 == "Type" && $2 != "Application" { hide = 1 }
+    ($1 == "Hidden" || $1 == "NoDisplay" || $1 == "Terminal") && tolower($2) == "true" { hide = 1 }
+    $1 == "OnlyShowIn" { hide = 1 }
+    $1 == "Name" { named = 1 }
+    $1 == "Exec" { execs = 1 }
+    END { exit !(named && execs && !hide) }
+  ' "$1"
+}
+
+mkdir -p "$DST"
+changed=0
+for src in "$SRC"/*.desktop; do
+  [[ -f $src ]] || continue
+  dst="$DST/${src##*/}"
+  [[ -e $dst ]] && ! ours "$dst" && continue      # an admin's own override wins
+  if (( ! show_all )) && wslg_shows "$src"; then
+    tmp=$(mktemp "$DST/.womarchy.XXXXXX")
+    {
+      echo "$MARK"
+      awk '
+        /^\[/ { group = $0; print; if (group == "[Desktop Entry]") print "OnlyShowIn=Hyprland;"; next }
+        group == "[Desktop Entry]" && /^(OnlyShowIn|NotShowIn)=/ { next }
+        { print }
+      ' "$src"
+    } >"$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$dst"   # always rewritten: the inotify event makes WSLg drop the entry again
+    changed=1
+  elif ours "$dst"; then
+    rm -f "$dst"; changed=1
+  fi
+done
+
+# Overrides whose package entry is gone.
+for dst in "$DST"/*.desktop; do
+  ours "$dst" && [[ ! -e $SRC/${dst##*/} ]] && { rm -f "$dst"; changed=1; }
+done
+
+if (( changed )) && command -v update-desktop-database >/dev/null; then
+  update-desktop-database -q "$DST" || true
+fi

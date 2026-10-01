@@ -1,0 +1,9 @@
+sleep 9000
+key super+Escape
+sleep 2000
+key Down
+sleep 300
+key Down
+sleep 300
+key Return
+sleep 20000

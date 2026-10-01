@@ -1,0 +1,12 @@
+# Private, writable /tmp/.X11-unix for the desktop's Xwayland (see /usr/lib/womarchy-session/x11-unix).
+[Unit]
+Description=Writable X11 socket directory for the Omarchy desktop
+DefaultDependencies=no
+After=tmp.mount wslg.service systemd-tmpfiles-setup.service
+Before=multi-user.target
+ConditionVirtualization=wsl
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/womarchy-session/x11-unix

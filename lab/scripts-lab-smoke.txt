@@ -1,0 +1,9 @@
+# lab smoke test: open a terminal, type into it, screenshot, quit
+sleep 1500
+key super+Return
+sleep 2000
+type echo "hello from womarchy: $((6*7))"
+key Return
+sleep 800
+shot script-lab.png
+quit

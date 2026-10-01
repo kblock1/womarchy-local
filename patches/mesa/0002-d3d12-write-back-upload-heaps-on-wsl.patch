@@ -1,0 +1,53 @@
+From: womarchy
+Subject: [PATCH] d3d12: put CPU-write buffers in a write-back heap on WSL
+
+On WSL 3.0.1 (kernel 6.18.40.1, RTX 5070) CPU stores into D3D12
+UPLOAD (write-combine) heap mappings run at about 9 MB/s, while
+write-back custom heaps run at several GB/s. A 1920x1080
+glTexSubImage2D took 860 ms instead of 1.6 ms. Use the write-back
+custom heap for CPU-write buffers on non-Windows builds;
+D3D12_UPLOAD_WRITE_BACK=0 restores the previous behaviour.
+
+Measured with womarchy lab/bench-upload.c and bench-faults.c.
+
+Generated-by: LLM
+---
+diff --git a/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp b/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
+index 859d65b..da2947f 100644
+--- a/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
++++ b/src/gallium/drivers/d3d12/d3d12_bufmgr.cpp
+@@ -32,6 +32,7 @@
+ 
+ #include "util/format/u_format.h"
+ #include "util/set.h"
++#include "util/u_debug.h"
+ #include "util/u_memory.h"
+ 
+ #include <dxguids/dxguids.h>
+@@ -113,6 +114,17 @@ d3d12_bo_wrap_res(struct d3d12_screen *screen, ID3D12Resource *res, enum d3d12_r
+    return bo;
+ }
+ 
++static D3D12_HEAP_TYPE
++d3d12_upload_heap_type(void)
++{
++#ifdef _WIN32
++   return D3D12_HEAP_TYPE_UPLOAD;
++#else
++   static const bool write_back = debug_get_bool_option("D3D12_UPLOAD_WRITE_BACK", true);
++   return write_back ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_UPLOAD;
++#endif
++}
++
+ struct d3d12_bo *
+ d3d12_bo_new(struct d3d12_screen *screen, uint64_t size, const pb_desc *pb_desc)
+ {
+@@ -136,7 +148,7 @@ d3d12_bo_new(struct d3d12_screen *screen, uint64_t size, const pb_desc *pb_desc)
+    if (pb_desc->usage & PB_USAGE_CPU_READ)
+       heap_type = D3D12_HEAP_TYPE_READBACK;
+    else if (pb_desc->usage & PB_USAGE_CPU_WRITE)
+-      heap_type = D3D12_HEAP_TYPE_UPLOAD;
++      heap_type = d3d12_upload_heap_type();
+ 
+    D3D12_HEAP_FLAGS heap_flags = screen->support_create_not_resident ?
+       D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT : D3D12_HEAP_FLAG_NONE;

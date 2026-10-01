@@ -1,0 +1,4 @@
+# X11 app inside the desktop + screenshot (xeyes is started by the harness at ~4 s)
+sleep 7000
+shot x11-shot.png
+quit

@@ -1,0 +1,20 @@
+# WSLg's shared-memory share (virtio-fs, DAX): frames written here are section-backed memory that
+# omarchy.exe maps directly on Windows (OpenFileMappingW "WSL\<VM id>\wslg\<name>"), so no pixel copy
+# crosses the VM boundary. Only present when WSLg is enabled; womarchy-session falls back without it.
+# Statically enabled by the package (multi-user.target.wants, off the local-fs critical path: only the
+# session needs it); the conditions make it a no-op elsewhere.
+[Unit]
+Description=WSLg shared memory for womarchy (zero-copy frames)
+ConditionVirtualization=wsl
+ConditionPathExists=/mnt/wslg
+DefaultDependencies=no
+After=local-fs.target
+Before=multi-user.target
+
+[Mount]
+What=wslg
+Where=/mnt/wslgshm
+Type=virtiofs
+Options=dax
+DirectoryMode=0755
+

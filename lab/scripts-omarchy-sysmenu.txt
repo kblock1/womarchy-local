@@ -1,0 +1,7 @@
+sleep 9000
+key super+Escape
+sleep 2500
+shot omarchy/30-system-menu.png
+key Escape
+sleep 500
+quit

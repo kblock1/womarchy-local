@@ -1,0 +1,18 @@
+#!/bin/sh
+# WSLg bind-mounts its own X socket directory read-only (and world-writable without the sticky bit)
+# over /tmp/.X11-unix, so the desktop's Xwayland can neither pass Hyprland's safety check nor create
+# its socket there. Give this distro a private, writable /tmp/.X11-unix instead and link WSLg's X0
+# back in, so X apps can still be shown by WSLg outside the desktop.
+d=/tmp/.X11-unix
+if [ -d "$d" ] && [ -k "$d" ] && touch "$d/.womarchy-probe" 2>/dev/null; then
+  rm -f "$d/.womarchy-probe"
+  exit 0 # already usable
+fi
+mkdir -p "$d" 2>/dev/null
+mount -t tmpfs -o mode=1777,nosuid,nodev,noexec,size=1m womarchy-x11 "$d" || exit 1
+# WSLg starts its X server lazily, so the link may dangle until then; it also keeps the desktop's
+# Xwayland off display :0
+if [ -d /mnt/wslg/.X11-unix ]; then
+  ln -sf /mnt/wslg/.X11-unix/X0 "$d/X0"
+fi
+exit 0

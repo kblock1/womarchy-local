@@ -1,0 +1,77 @@
+diff --git a/src/Compositor.cpp b/src/Compositor.cpp
+index 1d2d8b9..5fcfad5 100644
+--- a/src/Compositor.cpp
++++ b/src/Compositor.cpp
+@@ -308,15 +308,26 @@ void CCompositor::initServer(std::string socketName, int socketFd) {
+ 
+     std::vector<Aquamarine::SBackendImplementationOptions> implementations;
+     Aquamarine::SBackendImplementationOptions              option;
+-    option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_HEADLESS;
+-    option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_MANDATORY;
+-    implementations.emplace_back(option);
+-    option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_DRM;
+-    option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_IF_AVAILABLE;
+-    implementations.emplace_back(option);
+-    option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_WAYLAND;
+-    option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_FALLBACK;
+-    implementations.emplace_back(option);
++    const auto*                                            BACKENDENV = getenv("HYPRLAND_BACKEND");
++    if (BACKENDENV && std::string_view{BACKENDENV} == "wsl") {
++        // WSL2: no DRM, outputs and input come from a viewer on the Windows host
++        option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_WSL;
++        option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_MANDATORY;
++        implementations.emplace_back(option);
++        option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_HEADLESS;
++        option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_IF_AVAILABLE;
++        implementations.emplace_back(option);
++    } else {
++        option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_HEADLESS;
++        option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_MANDATORY;
++        implementations.emplace_back(option);
++        option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_DRM;
++        option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_IF_AVAILABLE;
++        implementations.emplace_back(option);
++        option.backendType        = Aquamarine::eBackendType::AQ_BACKEND_WAYLAND;
++        option.backendRequestMode = Aquamarine::eBackendRequestMode::AQ_BACKEND_REQUEST_FALLBACK;
++        implementations.emplace_back(option);
++    }
+ 
+     m_aqBackend = CBackend::create(implementations, options);
+ 
+diff --git a/src/debug/HyprCtl.cpp b/src/debug/HyprCtl.cpp
+index 060e25b..1fb77e6 100644
+--- a/src/debug/HyprCtl.cpp
++++ b/src/debug/HyprCtl.cpp
+@@ -1792,6 +1792,12 @@ static std::string dispatchOutput(eHyprCtlOutputFormat format, std::string reque
+                 impl->createOutput(vars[3]);
+                 break;
+             }
++
++            if (type == Aquamarine::AQ_BACKEND_WSL && (vars[2] == "wsl" || vars[2] == "auto")) {
++                added = true;
++                impl->createOutput(vars[3]);
++                break;
++            }
+         }
+ 
+         if (!added)
+diff --git a/src/helpers/SystemInfo.cpp b/src/helpers/SystemInfo.cpp
+index 1cc9db0..05ebaa4 100644
+--- a/src/helpers/SystemInfo.cpp
++++ b/src/helpers/SystemInfo.cpp
+@@ -42,6 +42,7 @@ std::string SystemInfo::getStatus(eHyprCtlOutputFormat fmt) {
+     switch (backendType) {
+         case Aquamarine::AQ_BACKEND_DRM: backendStr = "drm"; break;
+         case Aquamarine::AQ_BACKEND_WAYLAND: backendStr = "wayland"; break;
++        case Aquamarine::AQ_BACKEND_WSL: backendStr = "wsl"; break;
+         default: backendStr = "error"; break;
+     }
+ 
+@@ -153,6 +154,7 @@ std::string SystemInfo::getSystemInfo() {
+             case Aquamarine::AQ_BACKEND_DRM: return "drm";
+             case Aquamarine::AQ_BACKEND_HEADLESS: return "headless";
+             case Aquamarine::AQ_BACKEND_WAYLAND: return "wayland";
++            case Aquamarine::AQ_BACKEND_WSL: return "wsl";
+             default: break;
+         }
+         return "?";
