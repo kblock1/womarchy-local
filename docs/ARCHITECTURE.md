@@ -88,8 +88,27 @@ Costs worth knowing (measured, see [WORKLOG.md](WORKLOG.md)):
 | Input sender | Sends queued input (an mpsc channel) over the socket. |
 | Reader | Reads messages and hands each frame to its output's presenter. |
 | Presenter (one per output) | Owns its D3D11 device and swapchain (`SetMaximumFrameLatency(1)`). It uploads damage, presents, acks, and recovers from device loss by asking for a full frame (`REFRESH`). |
-| Clipboard | Connects to `womarchy-clipd` and syncs text both ways. Content Windows marks as excluded from clipboard history (password managers) is not sent. |
+| Clipboard | Connects to `womarchy-clipd` and syncs text, or images (PNG) when there is no text, both ways. It converts between PNG and Windows bitmaps with Windows' own imaging component. Content marked secret by a password manager is not sent from either side. |
 | Session waiter | Waits for `wsl.exe` to exit and returns its exit code. |
+
+## Updates, rollback and signing
+
+- **Updates.** Updates are Omarchy's own (`omarchy update` inside the distro, or the same from Windows).
+  - `pacman.conf` lists our `[womarchy]` repository before Arch's. Our builds of aquamarine, Hyprland and Mesa, and our overlay package `womarchy-compat`, therefore replace the stock packages.
+  - Overlay fixes arrive the same way. After each update, a hook runs `womarchy-apply-system --reassert`, which re-applies the WSL adjustments that Omarchy's update may have overwritten.
+- **Keeping our builds in step with Omarchy.** Omarchy installs from a dated snapshot of Arch (`stable-mirror.omarchy.org`). When that snapshot moves Hyprland's libraries or LLVM, our builds must be rebuilt against it.
+  - Our Hyprland and aquamarine packages depend on exact library versions (e.g. `libhyprutils.so=13-64`), so pacman refuses an update that would break them.
+  - A pacman hook does the same for Mesa's LLVM.
+  - Either way the update stops before changing anything. A daily CI job (`snapshot-watch.yml`) notices and opens an issue, and the on-demand build workflow (`packages.yml`) rebuilds against the new snapshot.
+- **Rollback.** A pacman hook records the installed package list before every update (one record per update session, the newest 5 kept). `womarchy-rollback`, also run by `omarchy rollback`, reinstalls those versions:
+  - from pacman's cache;
+  - then from the local repository copy;
+  - then, after asking, from the Arch archive and our release.
+
+  `omarchy backup` / `omarchy restore` cover everything else, as a whole-distro export.
+- **Signing.** The `[womarchy]` database and packages are signed in CI by a job that waits for a maintainer's approval; it is the only place the key exists.
+  - Installed systems get the public key from the `womarchy-keyring` package and require a valid database signature (`SigLevel = PackageOptional DatabaseRequired`). Packages are verified through the checksums in that signed database.
+  - Installs from before signing moved over automatically (see [INSTALL-NOTES.md](INSTALL-NOTES.md)).
 
 ## Security model
 
@@ -101,4 +120,4 @@ Costs worth knowing (measured, see [WORKLOG.md](WORKLOG.md)):
 - Nothing runs elevated:
   - no kernel modules, custom kernel or global WSL settings;
   - nothing is installed outside the distro except `omarchy.exe` (in `%LOCALAPPDATA%\Programs\Omarchy`), a Start menu shortcut and a user PATH entry.
-- Images and downloads are checked against published SHA-256 sums. The `[womarchy]` pacman repo inside the image is root-owned and read-only.
+- Images and downloads are checked against published SHA-256 sums. The `[womarchy]` package repository is signed (see above), and its local copy inside the image is root-owned and read-only.

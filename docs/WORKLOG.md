@@ -576,3 +576,60 @@ Both fixes are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#other-wsl-distros-afte
 - README rewritten: a short install-and-use guide with the WSL-update warning.
 - New: [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT.md](DEVELOPMENT.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [UPSTREAMING.md](UPSTREAMING.md), [patches/README.md](../patches/README.md).
 - [lab/README.md](../lab/README.md) now covers every script.
+
+### Omarchy overlay & image builder (agent): published overlay, signing, rollback points, Mesa/LLVM guard
+Tests used only the small packages and a throwaway distro installed from the existing local v0.1.0 image (`omarchy-test-up`, unregistered afterwards). No image build, no compiling.
+- **A. womarchy-compat 0.4.0 is a published package.**
+  - `prepare-sources.sh` in its directory packs `linux/overlay`.
+  - `build-all.sh` runs a package's `prepare-sources.sh` before makepkg. The default list now includes `womarchy-keyring` and `womarchy-compat`.
+  - `arch=(any)` packages build with `--nodeps` (they compile nothing, and `womarchy-keyring` is in no repo the build host knows). They are not installed on the build host, so compat's pacman hooks and the session's mount unit stay off it; compiled packages are installed as before.
+  - `build-image.sh` no longer builds compat. It requires `womarchy-compat` and `womarchy-keyring` in `out/repo` and never rewrites the db.
+- **B. Signing.**
+  - **Keyring package:** `womarchy-keyring` (any) installs `womarchy.gpg`, `womarchy-trusted` and `womarchy-revoked`, and runs `pacman-key --populate womarchy` when pacman's keyring is initialised.
+    - Pitfall found: makepkg treats a `*.asc` source as a detached signature and fails, which `--skippgpcheck` had been hiding. The PKGBUILD now reads `womarchy.asc` from `$startdir`.
+  - **`wsl/pacman.sh`** writes `SigLevel = PackageOptional DatabaseRequired` only when every key in `womarchy-trusted` is in pacman's keyring with full validity, populating first if needed. Otherwise it writes `Optional TrustAll` and prints a loud warning; during the image build it prints a short note instead.
+  - **Hosted URL:** now the `WOMARCHY_REPO_URL` setting in `/etc/womarchy/config` (default the GitHub `repo` release; also for mirrors and forks). `pacman.sh` and `womarchy-rollback` both honour it.
+  - **OOBE** populates the keyrings that are present (`archlinux omarchy womarchy`), then runs `pacman.sh`.
+  - **`linux/packages/fetch-signed-db.sh`:**
+    - **Download mode:** downloads the db/files (+ `.tar.gz` copies) with their `.sig` and every package `.sig` into a staging directory; `--fetch-packages` also downloads missing or different packages, and `--prune` deletes unlisted ones.
+    - **Checks:** only signatures by exactly the keys in `womarchy-trusted` count, and the key file must hold exactly those keys. The db must list exactly the local package files, with matching sha256 and valid signatures. Only then are the files moved into place. `--verify-only` checks a directory in place.
+    - **Tests:** 11 checks with throwaway keys (`lab/overlay/test-fetch-signed-db.sh`) cover a good repo, a tampered package, an unlisted file, `--prune`, a db signed by another key, a missing db `.sig`, and a key file with an extra key.
+  - **`build-image.sh`:**
+    - verifies `out/repo` (`ALLOW_UNSIGNED_REPO=1` is the lab-only escape) and trusts the pinned womarchy key on the build host (`WOMARCHY_KEY_FPR` in `omarchy-key.env`; `womarchy-trusted` and `womarchy.asc` must match it exactly);
+    - runs pacstrap with `[womarchy] SigLevel = PackageOptional DatabaseRequired`, and fails unless the image's sync db and its local repo copy carry valid signatures;
+    - removes same-named womarchy files from the package cache first.
+    - Its early gates were smoke-tested on an unsigned copy of `out/repo` and on one without compat; both fail before pacstrap.
+  - **`verify-image.sh`** checks the keyring package, the key's validity, the pinned fingerprint, the SigLevel, the configured hosted URL, the signatures of the local repo and sync dbs, both hooks, `womarchy-rollback --list`, and the soname dependencies.
+- **Upgrade v0.1.0 → 0.4.0** (`lab/overlay/test-up-phase3.sh`):
+  - **Setup:** a "next" repo was signed with a throwaway key, standing in for the womarchy key: the image's packages + compat 0.4.0 + a keyring package for that key. The hosted URL pointed at it.
+  - **Result:** a plain `omarchy update -y` as the user ran with no file conflicts and no manual steps:
+    - it upgraded compat 0.3.0-1 → 0.4.0-1 and installed `womarchy-keyring` as a dependency, whose install script populated and locally signed the key (validity `f`);
+    - the post-update hook's reassert ran the new `pacman.sh` and switched to `PackageOptional DatabaseRequired`;
+    - `pacman -Syy` works afterwards, and pacman keeps a valid `/var/lib/pacman/sync/womarchy.db.sig`.
+  - **Caveat (needs an owner decision):** this worked only because the key was already in the keyring, untrusted. Without it, as on a real v0.1.0 install, a signed db stops pacman: `key … is unknown` → `could not be looked up remotely` → `failed to synchronize all databases`. In other words, `omarchy update` fails for v0.1.0 users once `repo` is signed. With the key present but untrusted (as a keyserver auto-import would add it), `TrustAll` accepts the signed db (`lab/overlay/test-up-phase1.sh`).
+  - **Two upstream behaviours seen** (not womarchy):
+    - `omarchy update -y` still asks "Linux kernel has been updated. Reboot?", and without a terminal `gum confirm` spins forever. An unattended caller must dismiss it.
+    - `omarchy-restart-shell` prints a `jq` parse error when no Hyprland is running.
+- **C. Rollback points.**
+  - **Recording:** `/usr/share/libalpm/hooks/00-womarchy-rollback-point.hook` (PreTransaction, any package, no AbortOnFail) runs `/usr/lib/womarchy/rollback-point`. It saves `pacman -Q` atomically to `/var/lib/womarchy/rollback/<UTC>.pkgs`, at most one per 30 min, keeps 5, takes about 70 ms, and always exits 0.
+  - **Restoring:** `/usr/bin/womarchy-rollback [--list] [--to N|TIMESTAMP] [--yes] [--partial]` brings back the point's package set:
+    - it downgrades or reinstalls with one `pacman -U`, then removes added packages with `pacman -R`;
+    - it looks for the old files in the cache, then the local repo, then probes womarchy's release, Omarchy's repo and the Arch Linux Archive with HEAD requests and passes the URLs to pacman, which verifies the signatures;
+    - it asks before downloading (showing the list and size) and before acting, unless `--yes`;
+    - exit codes: 0 ok, 1 error, 2 cancelled or no terminal, 3 packages not found, 4 pacman failed, 5 no points.
+  - **Tests (`lab/overlay/test-up-phase4.sh`), all passing:**
+    - a downgrade from the local repo (compat 0.4.0 → 0.3.0) with the added keyring removed;
+    - the rollback's own transaction saving a point first;
+    - an Arch-archive download (`which` 2.21-6 → 2.25-1) plus removal of an added package (`sl`);
+    - missing packages → exit 3 with nothing changed, and `--partial` doing the rest;
+    - no points → 5, no terminal → 2, an unknown point → 1, and pruning to 5.
+- **D. Mesa/LLVM guard.**
+  - `10-womarchy-mesa-llvm.hook` (PreTransaction, Upgrade `llvm-libs`, AbortOnFail, NeedsTargets) runs `/usr/lib/womarchy/mesa-llvm-guard`. For womarchy's Mesa (pkgrel containing `.`), it compares the libLLVM soname `libgallium` needs (`libLLVM.so.22.1` today) with the first-repo `pacman -Si llvm-libs` version's `major.minor`. It aborts with a friendly message unless `[womarchy]` offers a newer Mesa.
+  - **Tests (`lab/overlay/test-up-phase5.sh`), all passing:**
+    - the script cases: same soname, a bump, a bump with a newer womarchy Mesa, a newer Mesa only from extra, stock Mesa;
+    - the real hook: a dummy `llvm-libs 99.1.0` in a first repo → `pacman -S` aborted with the message, `llvm-libs 22.1.8-2` unchanged. `pacman -Si` works inside the hook.
+  - Hyprland and aquamarine still depend on `libhyprutils.so=13-64`, `libaquamarine.so=14-64` and so on, so pacman refuses mismatched upgrades itself.
+- **Not yet exercised:**
+  - a full image build with the signed repo, including the OOBE populating `womarchy` in a fresh image;
+  - `build-all.sh` on the compiled packages, which needs a heavy build.
+  Both wait for the release build.

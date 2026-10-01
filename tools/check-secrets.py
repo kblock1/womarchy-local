@@ -21,6 +21,8 @@ PATTERNS = {
     "Windows user profile path": re.compile(
         r"[A-Za-z]:\\\\?Users\\\\?(?!(?:Public|Default|me|you|user|username|name)\\|<|%|\$|\{)[A-Za-z0-9._ -]+\\"
     ),
+    # the same profile as WSL sees it: /mnt/c/Users/<name>/
+    "Windows user profile path (WSL)": re.compile(r"/mnt/[a-z]/Users/(?!(?:Public|Default|me|you|user|username|name)/|<|\$|\*)[A-Za-z0-9._ -]+/"),
     # /home/<name>/ other than the image's test users and placeholders
     "Linux home path": re.compile(r"/home/(?!omarchy\b|lab\b|user\b|builder\b|<|\$|\*)[a-z_][a-z0-9_-]*/"),
 }

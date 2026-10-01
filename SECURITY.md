@@ -10,7 +10,7 @@ volunteer project.
 ## Supported versions
 
 Only the latest release gets fixes. Installed systems receive fixed packages through `omarchy update`
-from the [`[womarchy]` package repository](https://github.com/sytelus/womarchy/releases/tag/repo).
+from the [`[womarchy]` package repository](https://github.com/sytelus/womarchy/releases/tag/packages).
 
 ## What protects an installation
 

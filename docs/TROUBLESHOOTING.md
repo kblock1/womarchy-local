@@ -58,11 +58,41 @@ Run the installer again (`irm https://raw.githubusercontent.com/sytelus/womarchy
 - edit `XKBLAYOUT` (e.g. `us,de`) and `XKBOPTIONS` in `/etc/vconsole.conf`;
 - then log out and start `omarchy` again.
 
-**Copy/paste between Windows and Omarchy.** Only text is shared, both ways. Text that a password manager marks as secret is not shared, in either direction.
+**Copy/paste between Windows and Omarchy.** Text and images are shared, both ways. When the clipboard holds both, the text is sent. Anything a password manager marks as secret is not shared, in either direction.
+
+**Web pages with 3D graphics (WebGL) don't work in Chromium.** Chromium can't share its GPU frames with the desktop here, so it falls back to drawing everything on the CPU, without WebGL. Everyday browsing works fine.
+
+`--ignore-gpu-blocklist` alone makes WebGL report as working, but its output stays blank. For WebGL-heavy sites, either use a browser on Windows, or switch Chromium to X11:
+1. In `~/.config/chromium-flags.conf`, change `--ozone-platform=wayland` to `--ozone-platform=x11` and add the line `--ignore-gpu-blocklist`.
+2. Restart Chromium.
+
+WebGL then works, but costs 2–4 CPU cores while a 3D page animates, and windows may look softer on scaled monitors.
+
+**Microphone.** Windows' microphone reaches Linux as the `RDPSource` input (through WSLg). If apps hear nothing, check that Windows Settings → Privacy & security → Microphone allows desktop apps.
 
 **Blurry or wrongly sized desktop.** Each monitor gets the scale Windows uses for it, rounded to a scale Hyprland supports (175% becomes 166.7%). After changing Windows' display settings, the desktop follows within a second. If it doesn't, log out and start again.
 
 **Coming back to Windows.** Log out of Omarchy: Super+Escape opens the system menu. `omarchy` then returns to the prompt.
+
+## Updating and undoing updates
+
+**How to update.** Run `omarchy update` in a Windows terminal, or use "Update System" inside the desktop. Both run Omarchy's own updater. `omarchy update` also asks once whether to make a full backup before each update.
+
+**Undoing an update:**
+
+| Command | What it puts back | Cost |
+|---|---|---|
+| `omarchy rollback` | The package versions from before the last update (recorded automatically before every update) | Seconds, almost no disk |
+| `omarchy rollback --list` | Shows the saved points; `--to N` picks an older one | |
+| `omarchy restore` | The whole distro, as in the last `omarchy backup` (your files included) | A few minutes; disk about the size of the distro |
+
+`omarchy backup` and `omarchy restore` need the desktop to be closed (log out first).
+
+**Old packages:** rollback looks for them in pacman's cache first. If they aren't there, it asks before downloading them from the Arch and womarchy archives.
+
+**An update stops with "breaks dependency … required by hyprland" (or aquamarine), or with a womarchy message about Mesa and LLVM.** Omarchy's package snapshot moved ahead of womarchy's own builds of Hyprland, aquamarine or Mesa. Nothing was changed: the update stopped before installing anything. womarchy's automatic check notices this within a day and opens a [rebuild-needed issue](https://github.com/sytelus/womarchy/issues?q=label%3Arebuild-needed). Once the rebuilt packages are published, run the update again.
+
+**"Linux kernel has been updated. Reboot?" at the end of an update.** Answer **no**. WSL uses Microsoft's kernel, so there is nothing to reboot into; "yes" only stops the distro.
 
 ## Other WSL distros after the WSL update
 

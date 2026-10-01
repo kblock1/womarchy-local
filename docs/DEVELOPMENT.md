@@ -86,7 +86,7 @@ Benchmarks behind design decisions (for example `bench-upload.c` for the Mesa up
 - `windows/omarchy/src/wdp.rs`;
 - for the clipboard, `linux/packages/womarchy-session/womarchy-clipd`.
 
-The viewer and the compositor refuse to talk across versions, so release them together.
+The viewer and the compositor refuse to talk across versions, so release them together. Adding a message type doesn't need a version bump: receivers skip types they don't know (that's how `CLIP_IMAGE` was added). Clipboard-only additions can wait for the next aquamarine change to reach its copy of the header, since aquamarine doesn't use them.
 
 ## Rules for working on a shared machine
 
@@ -97,12 +97,30 @@ WSL distros share one VM, kernel and memory. A mistake in a test distro can affe
 - Avoid `wsl --shutdown`: it stops every distro. Use `wsl --terminate <distro>`.
 - Build under `nice`, and stop build/test distros when done.
 
+## Continuous integration
+
+All of it runs on GitHub's free runners for public repositories; nothing runs on your machine.
+
+| Workflow | When | What |
+|---|---|---|
+| [checks](../.github/workflows/checks.yml) | Every push and pull request | `omarchy.exe` build, unit tests and clippy; shellcheck and `bash -n`; Python and PowerShell parse checks; docs links ([tools/check-links.py](../tools/check-links.py)); secrets and personal paths ([tools/check-secrets.py](../tools/check-secrets.py)). A few minutes. |
+| [packages](../.github/workflows/packages.yml) | On demand (Actions → packages → Run workflow) | Builds the listed packages in an Arch container on Omarchy's package snapshot. Then **waits for a maintainer's approval** before signing and publishing them to the `packages` release (the signed `[womarchy]` repository). |
+| [snapshot watch](../.github/workflows/snapshot-watch.yml) | Daily | If Omarchy's snapshot moved: checks our packages still install and link on it, and opens or closes a `rebuild-needed` issue. Under a minute when nothing changed. |
+
+The signing key exists only as the `womarchy-repo` environment's secret. That environment only runs on `main` and requires a reviewer's approval.
+
 ## Releasing
 
-1. Build the packages and the lite image (above), then run the tests.
-2. Build `omarchy.exe`.
-3. Create a GitHub release with these assets:
+1. Change the code and push; `checks` must pass.
+2. Rebuild packages whose sources changed: run the **packages** workflow with their names (e.g. `womarchy-session womarchy-compat`), then approve its publish step. Installed systems pick them up with their next `omarchy update`.
+3. For a new image (when the overlay or the first-run experience changed):
+   - fetch the signed repository: `linux/packages/fetch-signed-db.sh --fetch-packages --prune`;
+   - build the lite image ([linux/image/README.md](../linux/image/README.md)) and test it with `linux/image/test-image.ps1`.
+4. Build `omarchy.exe`, then create a GitHub release with:
    - `Omarchy.wsl` (the lite image), `omarchy.exe`, and a `.sha256` file for each (`sha256sum` format; the installers check them);
    - a copy of [install.ps1](../install.ps1).
-4. Upload `out/repo` (packages plus `womarchy.db*` and `womarchy.files*`) to the release tagged `repo`. Installed systems get our package updates from there, since the image's pacman.conf lists `[womarchy]` before Arch's repos.
-5. Update the status in [PLAN.md](PLAN.md) and add a [WORKLOG.md](WORKLOG.md) entry.
+
+   Release asset names must not contain `:`; `build-all.sh` already renames packages that would.
+5. Add a [CHANGELOG.md](../CHANGELOG.md) entry, update the status in [PLAN.md](PLAN.md), and add a [WORKLOG.md](WORKLOG.md) entry.
+
+The old `repo` release is the frozen, unsigned repository of v0.1.0. It only exists so those installs can move to the signed one; never add signatures or packages to it.

@@ -1,5 +1,9 @@
 # Omarchy on WSL
 
+[![checks](https://github.com/sytelus/womarchy/actions/workflows/checks.yml/badge.svg)](https://github.com/sytelus/womarchy/actions/workflows/checks.yml)
+[![release](https://img.shields.io/github/v/release/sytelus/womarchy)](https://github.com/sytelus/womarchy/releases/latest)
+[![license](https://img.shields.io/github/license/sytelus/womarchy)](LICENSE)
+
 Run [Omarchy](https://omarchy.org), the Arch Linux + Hyprland desktop, on Windows 11, full screen on
 all your monitors, composited on your GPU. Type `omarchy` at any Windows prompt to get the desktop; log
 out to get your prompt back. (An unofficial project, not affiliated with Omarchy or Basecamp.)
@@ -38,11 +42,14 @@ The installer:
 | Start the desktop | **Omarchy** in the Start menu, or `omarchy` in a terminal |
 | Back to Windows | Log out (Super+Escape opens the system menu), or **Ctrl+Alt+End** to minimise |
 | Omarchy's menu / keyboard shortcuts | Super+Space / Super+K |
+| Update Omarchy | `omarchy update` (or "Update System" inside the desktop) |
+| Undo the last update | `omarchy rollback` (puts back the previous package versions) |
+| Back up / restore everything | `omarchy backup` / `omarchy restore` (the whole distro as one file) |
 | Check the installation | `omarchy status` |
 | Remove everything | `omarchy uninstall` |
 
 - Windows always keeps **Win+L** (lock) and **Ctrl+Alt+Del** for itself, so Omarchy's shortcuts on those keys move to Super+Alt+L and Super+Ctrl+Alt+Backspace.
-- Copy and paste work between Windows and Omarchy (text).
+- Copy and paste work between Windows and Omarchy, for text and images.
 - To save download size, the image leaves out Omarchy's largest apps (LibreOffice, OBS, Kdenlive, ...). Install any of them from Omarchy's menu.
 
 Problems? See [Troubleshooting](docs/TROUBLESHOOTING.md).
@@ -65,6 +72,11 @@ No custom kernel, kernel modules or global WSL settings are involved.
 | [Development](docs/DEVELOPMENT.md) | Building, testing, changing the protocol, releasing |
 | [Patches](patches/README.md) and [upstreaming plan](docs/UPSTREAMING.md) | What we change in aquamarine, Hyprland and Mesa, and how it goes upstream |
 | [Feasibility study](docs/FEASIBILITY.md), [plan](docs/PLAN.md), [work log](docs/WORKLOG.md), [install notes](docs/INSTALL-NOTES.md) | The research, the plan and its status, what was done and found, and the distilled install requirements |
+
+## Contributing
+
+Bug reports, test results from other GPUs and machines, and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md)
+and [open an issue](https://github.com/sytelus/womarchy/issues/new/choose). Security problems: [SECURITY.md](SECURITY.md).
 
 ## License
 

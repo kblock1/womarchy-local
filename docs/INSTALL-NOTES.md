@@ -116,7 +116,7 @@ What changed after the code review, in detail (the notes above are updated to ma
 - **[womarchy] repository**
   - The local copy is at `/var/lib/womarchy/repo`, not `/var/cache`, because cache cleaners would delete it.
   - It is root-owned and never group/other-writable: it is trusted (`TrustAll`) and comes first, so a writable copy would let any user plant packages that root installs.
-  - `pacman.conf` lists `Server = https://github.com/sytelus/womarchy/releases/download/repo` first, then `file:///var/lib/womarchy/repo` as the offline fallback.
+  - `pacman.conf` lists `Server = https://github.com/sytelus/womarchy/releases/download/packages` first, then `file:///var/lib/womarchy/repo` as the offline fallback.
   - `wsl/pacman.sh` repairs ownership and permissions, migrates the old `/var/cache/womarchy-repo`, and **fails loudly** rather than leave `[womarchy]` out.
   - **(script)** The installer must never copy the repo with modes from a Windows drive.
 - **Settings:** `/etc/womarchy/config` holds `WOMARCHY_DOCKER` (default 1) and `WOMARCHY_FIREWALL` (default 0). Change a setting with `sudo WOMARCHY_DOCKER=0 womarchy-apply-system --reassert`: the value is saved to the file and kept across `omarchy update`.
@@ -131,3 +131,22 @@ What changed after the code review, in detail (the notes above are updated to ma
 - **Testing:** `test-image.ps1 -Image … -Name omarchy-test-N [-Location …]` defaults its location to `%LOCALAPPDATA%\womarchy-test\<name>`. It unregisters the distro even when a step fails, unless `-Keep` is given.
 - **(release step)** Before publishing an image, run `lab/overlay/privacy-scan.sh` on a `KEEP_ROOTFS=1` build. It greps every file, binaries included, for owner and machine strings, and checks machine-id, hostname, logs, keys and history. The builder itself refuses to pack when machine-id, hostname, pacman's keyring, `/root` or `/home` content, journal files or SSH host keys are present. The image ships without `/etc/machine-id`; systemd creates a unique one at first boot.
 - Package **file** names in the `[womarchy]` repo carry no `:` (epochs renamed, as GitHub release assets require). Tools must find packages by name in the db (`%FILENAME%`) or with `pacman -Q`, never by globbing file names.
+
+### [womarchy] signing, overlay updates, rollback points
+- **Overlay updates:** fixes reach installed systems through `womarchy-compat` from the `[womarchy]` repo with a plain `omarchy update`. The post-update hook then runs the new `womarchy-apply-system --reassert`.
+  - **(release step)** Build `womarchy-keyring` and `womarchy-compat` with `linux/packages/build-all.sh` like the other packages. CI signs and publishes them.
+- **Signing**
+  - **What CI publishes** in the `packages` release: `womarchy.db`, `womarchy.files` (and the `.tar.gz` copies), each with a `.sig`; every package with a `.sig`; old package files kept (for `womarchy-rollback`).
+  - **(release step)** Before building an image, run `linux/packages/fetch-signed-db.sh --fetch-packages --prune`. `build-image.sh` refuses an unsigned or inconsistent `out/repo` (`ALLOW_UNSIGNED_REPO=1` is for lab images only).
+  - **On installed systems:** `[womarchy] SigLevel = PackageOptional DatabaseRequired` is written once the womarchy key (`EB71032617BBA1C4C8EE77C3047A25C1135F969D`, from `womarchy-keyring`) is in pacman's keyring and trusted. Until then `Optional TrustAll` stays, with a warning.
+  - **Repo URL:** set by `WOMARCHY_REPO_URL` in `/etc/womarchy/config`.
+- **Moving v0.1.0 installs to the signed repo:** v0.1.0 installs don't have the womarchy key. With `Optional TrustAll`, pacman still verifies a published `.sig`, fails to fetch the unknown key, and aborts `omarchy update` ("failed to synchronize all databases"). So signing is not added to the old URL. Instead:
+  - The signed repo lives at a **new** release tag, `packages`. `womarchy-compat` 0.4.0 and later default `WOMARCHY_REPO_URL` to it.
+  - The old `repo` tag stays **unsigned** (never any `.sig`) and **frozen**. It holds the same `womarchy-compat`, `womarchy-keyring` and `womarchy-session` builds as `packages`, so a v0.1.0 install's next `omarchy update` gets the key and the new overlay. The post-update `--reassert` then switches it to `packages` with `DatabaseRequired`. Nobody has to do anything by hand.
+  - **(release step)** Publish `packages` first, then the transition packages on `repo`. In the other order, a v0.1.0 install would switch to a URL that doesn't exist yet.
+- **Rollback:** before every package change a rollback point is saved (`/var/lib/womarchy/rollback`; one per 30 min, newest 5).
+  - **(script)** `sudo womarchy-rollback` returns to the newest point; `--list`, `--to N`, `--yes`, `--partial` are available, and `omarchy rollback` will call it.
+  - It downloads old packages only after asking, and pacman verifies them.
+  - Exit codes: 0 ok, 1 error, 2 cancelled or no terminal (use `--yes`), 3 old packages not found (use `--partial`), 4 pacman failed, 5 no points.
+- **LLVM:** `omarchy update` stops, changing nothing, when an `llvm-libs` upgrade would break womarchy's Mesa. Run it again once womarchy has published a matching Mesa (issues labelled `rebuild-needed`).
+- **(script)** `omarchy update -y` is not fully unattended: Omarchy's final "Linux kernel has been updated. Reboot?" prompt still appears, and it hangs without a terminal. A launcher that runs it must give it a terminal or answer that prompt.
