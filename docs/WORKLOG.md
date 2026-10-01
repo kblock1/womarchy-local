@@ -704,9 +704,19 @@ Decision: no default change. TROUBLESHOOTING documents the X11 opt-in for WebGL-
 - **Cause:** Windows was locked (`LogonUI` running, no input for 34 minutes). Presents stall and the clipboard can't be opened while locked.
 - **Change:** the tests that show the desktop now stop early on a locked screen (`lab/assert-desktop.ps1`; with `throw`, because `exit` in a dot-sourced file only leaves that file).
 
-**README demo GIF tooling:**
-- `omarchy.exe --input-script` gained `mark TEXT`, which logs a timestamp so recordings can be cut into scenes.
-- `lab/demo-gif.ps1` runs `lab/scripts-omarchy-demo.txt` in a window. `lab/demo-record.sh` screenshots the desktop from inside the session with grim, which avoids window borders and DPI scaling of a Windows-side capture.
-- `lab/make-demo-gif.py` adds a title card and a caption per scene. It uses one palette for all frames and merges identical ones, which keeps the GIF small.
+**README demo GIF** (`docs/img/demo.gif`: 47 s, 960x540, 8 MB; recorded once Windows was unlocked, on the power-saving plan):
+- **Tooling:**
+  - `omarchy.exe --input-script` gained `mark TEXT`, which logs a timestamp so recordings can be cut into scenes.
+  - `lab/demo-gif.ps1` runs `lab/scripts-omarchy-demo.txt` in a 1920x1080 window at scale 1.5.
+  - `lab/demo-record.sh` screenshots the desktop from inside the session with grim, so there are no window borders and no DPI scaling of a Windows-side capture.
+  - `lab/make-demo-gif.py` cuts the frames into captioned scenes between a title card and a closing card.
+- **What the takes taught us:**
+  - **Capture speed.** grim's PNG compression was the bottleneck: 193 ms a frame at 1080p (~4 fps, choppy) against 46 ms for JPEG at quality 95. Downscaling in grim (`-s`) was slow too, at 140–180 ms.
+  - **A new window takes the keyboard focus.** `vkcube` typed on the line after `es2gears_wayland &` went into the gears window. One command line now starts all the GPU apps.
+  - **Palette sampling.** One palette for the whole GIF, sampled before the apps appeared, turned the green gear grey. Each scene now gets its own palette from six of its frames.
+  - **Pauses that aren't still.** A blinking cursor changes every frame, so "merge identical frames" never shortened the waits. Frames that change less than 0.5% of the picture now count as still, and a still stretch is cut after 1 s.
+  - **Repeatable state.** The theme gallery is alphabetical and the previous take left a different theme. The script now resets to Tokyo Night before the first mark, where the GIF doesn't show it.
+  - **Privacy.** fastfetch lists the Windows drives and their sizes (9p mounts) and the distro's name. `lab/demo-prepare.sh` gives the throwaway distro a fastfetch config without them.
+- **Content:** fastfetch (RTX 5070), btop tiled beside it, Omarchy's menu, the theme gallery applying Rose Pine, then browsing to Gruvbox, then `glxinfo` showing "D3D12 (NVIDIA GeForce RTX 5070)" with es2gears and vkcube. The closing card shows the three-monitor screenshot and the install line.
 
 **Project:** new README (highlights, install and use, the work-in-progress warning, a diagram); contributions through issues only, with a "fix, if you have one" field in the issue forms; `docs/JOURNEY.md`.

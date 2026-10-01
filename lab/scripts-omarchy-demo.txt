@@ -1,42 +1,97 @@
-# The README demo (lab/demo-gif.ps1): the desktop, a terminal with fastfetch, Omarchy's menu, live
-# theme changes, and OpenGL + Vulkan apps on the GPU. Each `mark` starts a captioned scene of the GIF
-# (lab/make-demo-gif.py); `mark end` ends it. Needs mesa-utils and vulkan-tools in the distro.
-sleep 5000
+# The README demo (lab/demo-gif.ps1). Each `mark` starts a captioned scene of the GIF
+# (CAPTIONS in lab/make-demo-gif.py); `mark end` ends it. Needs mesa-utils and vulkan-tools.
+# Before the first mark (not in the GIF): back to Omarchy's default theme, Tokyo Night, which the
+# gallery steps below start from (the gallery is alphabetical).
+sleep 7000
+key super+Return
+sleep 2000
+type omarchy theme set "Tokyo Night" && exit
+key Return
+sleep 6000
 key super+shift+comma
 sleep 1500
 mark desktop
-sleep 3000
+sleep 2500
+# fastfetch in a terminal
 mark terminal
 key super+Return
-sleep 2500
+sleep 2000
 type fastfetch
 key Return
-sleep 5000
-mark menu
-key super+space
-sleep 4000
-key Escape
-sleep 800
-mark theme
-type clear
-key Return
-type omarchy theme set "Catppuccin Latte"
-key Return
-sleep 6000
-type clear
-key Return
-type omarchy theme set "Gruvbox"
-key Return
-sleep 6000
-mark apps
-type clear
-key Return
-type es2gears_wayland >/dev/null &
+sleep 4500
+# a second window tiles beside it; fastfetch again in the narrower left one (without its logo, which
+# no longer fits)
+mark tiling
+key super+Return
+sleep 1800
+type btop
 key Return
 sleep 2500
-type vkcube --wsi wayland >/dev/null &
+key super+Left
+sleep 600
+type clear && fastfetch -l none
 key Return
-sleep 7000
+sleep 3500
+# Omarchy's menu
+mark menu
+key super+space
+sleep 2000
+key Down
+sleep 700
+key Down
+sleep 700
+key Down
+sleep 1500
+key Escape
+sleep 800
+# the theme gallery: two steps back to Rose Pine, apply it; then browse further back to Gruvbox
+mark themes
+key super+shift+ctrl+space
+sleep 2500
+key Left
+sleep 1200
+key Left
+sleep 1500
+key Return
+sleep 5500
+key super+shift+ctrl+space
+sleep 2000
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 350
+key Left
+sleep 1500
+key Return
+sleep 5500
+# GPU apps on a new workspace
+mark gpu
+key super+2
+sleep 900
+key super+Return
+sleep 1500
+# one line: each new window takes the focus, so a second command would be typed into the first app
+type glxinfo -B | grep "OpenGL renderer"; es2gears_wayland &>/dev/null & vkcube --wsi wayland &>/dev/null &
+key Return
+sleep 9000
 mark end
 sleep 500
 quit

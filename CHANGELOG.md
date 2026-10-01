@@ -13,7 +13,7 @@
 
 **Project**
 - Continuous integration, issue forms, contributing and security guides. Contributions come through issues; pull requests aren't accepted directly.
-- A new README, and [the journey](docs/JOURNEY.md): how this was built, the bugs, and how each was found and fixed.
+- A new README with a demo GIF, and [the journey](docs/JOURNEY.md): how this was built, the bugs, and how each was found and fixed.
 - New troubleshooting entries for browser 3D (WebGL), the microphone, and updates.
 
 ## 0.1.0 (2026-10-01)

@@ -9,7 +9,7 @@
 dual boot, no reboot: type `omarchy` at any Windows prompt to get the desktop, and log out to get your
 prompt back.
 
-![Omarchy on three 4K monitors with mixed DPI, a GL and a Vulkan app running](docs/img/three-monitors.png)
+![Demo: typing omarchy in Windows Terminal opens the Omarchy desktop: fastfetch on an NVIDIA GPU, tiling windows with btop, Omarchy's menu, the theme gallery switching themes live, and OpenGL gears with a Vulkan cube running through Direct3D 12](docs/img/demo.gif)
 
 ## Highlights
 
@@ -21,6 +21,8 @@ prompt back.
 - 🛟 **Updates you can undo.** `omarchy update` runs Omarchy's own updater. A rollback point is recorded before every update, and `omarchy rollback` puts the previous versions back. womarchy's packages come from a signed repository.
 - 💾 **Whole-distro backups** with `omarchy backup` and `omarchy restore`.
 - 🧹 **Leaves Windows alone.** No custom kernel, no kernel modules, no global WSL settings. `omarchy uninstall` removes everything.
+
+![Omarchy on three 4K monitors with mixed DPI, a GL and a Vulkan app running](docs/img/three-monitors.png)
 
 ## Install
 

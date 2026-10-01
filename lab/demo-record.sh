@@ -1,8 +1,9 @@
 #!/bin/bash
 # In-session recorder for lab/demo-gif.ps1 (run as the desktop user): once the Omarchy session is up,
-# take a grim screenshot of the desktop every ~100 ms into ~/.cache/womarchy-demo/frame-<unix ms>.png,
-# until ~/.cache/womarchy-demo/stop exists (or 4 minutes pass). On disk, not in /tmp: a minute of
-# 1080p PNGs is about a gigabyte, and /tmp is RAM.
+# take grim screenshots of the desktop into ~/.cache/womarchy-demo/frame-<unix ms>.jpg as fast as
+# it goes, until ~/.cache/womarchy-demo/stop exists (or 4 minutes pass).
+# JPEG at quality 95: ~45 ms a frame at 1080p, against ~190 ms for PNG (its compression is the slow
+# part), so motion stays smooth. On disk, not in /tmp: a minute and a half is ~700 MB, and /tmp is RAM.
 #
 # Recording inside the session shows exactly what the compositor drew, and keeps working when Windows
 # isn't showing it (a locked screen, monitors asleep).
@@ -21,7 +22,7 @@ done
 
 deadline=$((SECONDS + 240))
 while [[ ! -e $out/stop ]] && ((SECONDS < deadline)); do
-  grim -l 1 "$out/frame-$(date +%s%3N).png" 2>/dev/null
-  sleep 0.1
+  grim -t jpeg -q 95 "$out/frame-$(date +%s%3N).jpg" 2>/dev/null
+  sleep 0.02
 done
 echo "recorded $(ls "$out" | grep -c '^frame-') frames"

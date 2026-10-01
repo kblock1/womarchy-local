@@ -229,4 +229,5 @@ Most tests drive the real desktop through `omarchy.exe --input-script` (keys, ty
 - **Micro-benchmarks** in plain C (`lab/bench-*.c`): tiny programs that isolate one cost, so a theory can be tested in minutes.
 - **Frame dumps and screen captures** from both sides (`--dump-frame`, `lab/fullscreen-test.ps1`).
 - **Throwaway distros** (`omarchy-test*`), installed from local images (no download) and deleted afterwards. No experiment ever touched the owner's distros.
+- **Recording from inside the compositor** (`lab/demo-gif.ps1`): a scripted session, grim screenshots from inside it, and timestamps from the script to cut scenes. The README's GIF comes from it, with no screen recorder on Windows.
 - **A written log** ([WORKLOG.md](WORKLOG.md)) of every finding, including false leads, so nothing was debugged twice.
