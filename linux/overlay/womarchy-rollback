@@ -1,0 +1,244 @@
+#!/bin/bash
+# womarchy-rollback: return the installed packages to a rollback point.
+# Points are saved automatically before pacman transactions (one per update
+# session, newest 5 kept) by /usr/lib/womarchy/rollback-point.
+set -uo pipefail
+export LC_ALL=C
+
+DIR=/var/lib/womarchy/rollback
+CACHE=/var/cache/pacman/pkg
+LOCAL_REPO=/var/lib/womarchy/repo
+WOMARCHY_URL=$(sed -n 's/^WOMARCHY_REPO_URL=//p' /etc/womarchy/config 2>/dev/null | tail -n1)
+WOMARCHY_URL=${WOMARCHY_URL:-https://github.com/sytelus/womarchy/releases/download/packages}   # womarchy-apply-system's setting
+OMARCHY_URL=https://pkgs.omarchy.org/stable/x86_64
+ARCH_ARCHIVE=https://archive.archlinux.org/packages
+
+# Exit codes (omarchy.exe runs this through `omarchy rollback`):
+E_OK=0 E_ERROR=1 E_CANCELLED=2 E_MISSING=3 E_PACMAN=4 E_NOPOINTS=5
+
+usage() {
+  cat <<'USAGE'
+Usage: womarchy-rollback [--list] [--to POINT] [--yes] [--partial]
+
+Restore the installed package set of a rollback point (default: the newest):
+packages changed since then go back to their old version, removed ones are
+reinstalled, and packages added since are removed. Old package files come from
+pacman's cache, womarchy's local repo, or are downloaded (womarchy's release,
+Omarchy's repo, the Arch Linux Archive); pacman verifies their signatures.
+
+  --list        list the rollback points and how far each is from now
+  --to POINT    a point from --list: its number (1 = newest) or timestamp
+  --yes         do not ask (downloads, removals, the final go-ahead)
+  --partial     go ahead even if some old packages cannot be found anywhere
+
+Exit status: 0 done or nothing to do, 1 error, 2 cancelled, 3 packages not
+found (without --partial), 4 pacman failed, 5 no rollback points.
+USAGE
+}
+
+say() { printf '%s\n' "$*"; }
+err() { printf 'womarchy-rollback: %s\n' "$*" >&2; }
+confirm() { # confirm "question": yes with --yes; needs a terminal otherwise
+  (( assume_yes )) && return 0
+  if [[ ! -t 0 ]]; then err "no terminal to confirm; rerun with --yes"; exit "$E_CANCELLED"; fi
+  local a
+  read -r -p "$1 [y/N] " a || return 1
+  [[ $a == [yY]* ]]
+}
+
+list_only=0 assume_yes=0 partial=0 point_arg=""
+while (($#)); do
+  case "$1" in
+    --list) list_only=1; shift ;;
+    --to) point_arg=${2:-}; [[ -n $point_arg ]] || { err "--to needs a point"; exit "$E_ERROR"; }; shift 2 ;;
+    --to=*) point_arg=${1#*=}; shift ;;
+    --yes|-y) assume_yes=1; shift ;;
+    --partial) partial=1; shift ;;
+    -h|--help) usage; exit "$E_OK" ;;
+    *) err "unknown option: $1"; usage >&2; exit "$E_ERROR" ;;
+  esac
+done
+
+mapfile -t points < <(find "$DIR" -maxdepth 1 -name '*.pkgs' -printf '%f\n' 2>/dev/null | sort -r)  # newest first
+if ((${#points[@]} == 0)); then
+  err "no rollback points in $DIR (they are saved before package changes)"
+  exit "$E_NOPOINTS"
+fi
+
+pretty() { # 20261001T053012Z -> 2026-10-01 05:30:12 UTC
+  local t=${1%.pkgs}
+  [[ $t =~ ^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$ ]] || { echo "$t"; return; }
+  echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]} UTC"
+}
+
+declare -A cur
+while read -r n v; do cur[$n]=$v; done < <(pacman -Q)
+
+# diff_point FILE: fills change[] (name), reinstall[] (name), remove[] (name), want[name]=ver
+diff_point() {
+  change=() reinstall=() remove=()
+  unset want; declare -gA want
+  local n v
+  while read -r n v; do [[ -n $n && -n $v ]] && want[$n]=$v; done <"$1"
+  for n in "${!want[@]}"; do
+    if [[ -z ${cur[$n]:-} ]]; then reinstall+=("$n")
+    elif [[ ${cur[$n]} != "${want[$n]}" ]]; then change+=("$n"); fi
+  done
+  for n in "${!cur[@]}"; do [[ -n ${want[$n]:-} ]] || remove+=("$n"); done
+}
+
+if (( list_only )); then
+  i=0
+  for p in "${points[@]}"; do
+    i=$((i + 1))
+    diff_point "$DIR/$p"
+    printf '%2d  %s  %s  %4d packages  (since then: %d changed, %d removed, %d added)\n' \
+      "$i" "${p%.pkgs}" "$(pretty "$p")" "${#want[@]}" "${#change[@]}" "${#reinstall[@]}" "${#remove[@]}"
+  done
+  exit "$E_OK"
+fi
+
+if (( EUID != 0 )); then err "run as root: sudo womarchy-rollback"; exit "$E_ERROR"; fi
+
+# --- pick the point --------------------------------------------------------------
+point=""
+if [[ -z $point_arg ]]; then
+  point=${points[0]}
+elif [[ $point_arg =~ ^[0-9]{1,2}$ ]] && (( point_arg >= 1 && point_arg <= ${#points[@]} )); then
+  point=${points[point_arg - 1]}
+else
+  for p in "${points[@]}"; do
+    [[ $p == "${point_arg##*/}" || $p == "${point_arg##*/}.pkgs" ]] && { point=$p; break; }
+  done
+fi
+[[ -n $point ]] || { err "no rollback point '$point_arg' (see --list)"; exit "$E_ERROR"; }
+diff_point "$DIR/$point"
+for i in "${!points[@]}"; do [[ ${points[i]} == "$point" ]] && break; done
+say "Rollback point $((i + 1)): $(pretty "$point")"
+if (( ${#change[@]} + ${#reinstall[@]} + ${#remove[@]} == 0 )); then
+  say "The installed packages already match this point; nothing to do."
+  exit "$E_OK"
+fi
+
+# --- find the old package files -----------------------------------------------------
+pkginfo_matches() { # FILE NAME VER: the package file really is NAME VER
+  local info
+  info=$(bsdtar -xOf "$1" .PKGINFO 2>/dev/null) || return 1
+  grep -qx "pkgname = $2" <<<"$info" && grep -qx "pkgver = $3" <<<"$info"
+}
+find_cached() { # NAME VER -> path in pacman's cache
+  local f v
+  for v in "$2" "${2//:/.}"; do
+    for f in "$CACHE/$1-$v"-*.pkg.tar.*; do
+      [[ -f $f && $f != *.sig ]] || continue
+      pkginfo_matches "$f" "$1" "$2" && { echo "$f"; return 0; }
+    done
+  done
+  return 1
+}
+declare -A local_repo_file
+if [[ -f $LOCAL_REPO/womarchy.db ]]; then
+  while IFS=$'\t' read -r nv file; do local_repo_file[$nv]=$file; done < <(
+    bsdtar -xOf "$LOCAL_REPO/womarchy.db" '*/desc' 2>/dev/null | awk '
+      /^%FILENAME%$/ { getline; file = $0 } /^%NAME%$/ { getline; name = $0 }
+      /^%VERSION%$/ { getline; print name "-" $0 "\t" file }')
+fi
+find_local_repo() { # NAME VER -> path in womarchy's local repo
+  local file=${local_repo_file["$1-$2"]:-}
+  [[ -n $file && -f $LOCAL_REPO/$file ]] && { echo "$LOCAL_REPO/$file"; return 0; }
+  return 1
+}
+declare -A repo_of
+while read -r r n _; do [[ -n ${repo_of[$n]:-} ]] || repo_of[$n]=$r; done < <(pacman -Sl 2>/dev/null)
+probe() { # URL -> size in bytes if it exists (HEAD, follows redirects)
+  local h
+  h=$(curl -fsIL --max-time 20 "$1" 2>/dev/null) || return 1
+  awk 'tolower($1) == "content-length:" { n = $2 } END { gsub(/\r/, "", n); print (n == "" ? 0 : n) }' <<<"$h"
+}
+find_online() { # NAME VER -> "URL SIZE"
+  local n=$1 v=$2 arch archs=() url size cands=()
+  if [[ -n ${cur[$n]:-} ]]; then
+    arch=$(pacman -Qi "$n" 2>/dev/null | awk -F': ' '/^Architecture/ { print $2; exit }')
+    archs=("${arch:-x86_64}")
+  else
+    archs=(x86_64 any)
+  fi
+  for arch in "${archs[@]}"; do
+    local wm="$WOMARCHY_URL/$n-${v//:/.}-$arch.pkg.tar.zst"
+    local om="$OMARCHY_URL/$n-$v-$arch.pkg.tar.zst"
+    local ar="$ARCH_ARCHIVE/${n:0:1}/$n/$n-$v-$arch.pkg.tar.zst" arx="$ARCH_ARCHIVE/${n:0:1}/$n/$n-$v-$arch.pkg.tar.xz"
+    case ${repo_of[$n]:-} in
+      womarchy) cands+=("$wm" "$ar") ;;
+      omarchy) cands+=("$om" "$ar" "$arx") ;;
+      *) cands+=("$ar" "$arx" "$om") ;;
+    esac
+  done
+  for url in "${cands[@]}"; do
+    size=$(probe "$url") && { echo "$url $size"; return 0; }
+  done
+  return 1
+}
+
+targets=() downloads=() missing=() dl_bytes=0
+declare -A source_of
+for n in "${change[@]}" "${reinstall[@]}"; do
+  v=${want[$n]}
+  if f=$(find_cached "$n" "$v"); then targets+=("$f"); source_of[$n]="cache"
+  elif f=$(find_local_repo "$n" "$v"); then targets+=("$f"); source_of[$n]="womarchy local repo"
+  elif r=$(find_online "$n" "$v"); then
+    targets+=("${r% *}"); downloads+=("$n $v ${r% *}"); dl_bytes=$((dl_bytes + ${r##* }))
+    source_of[$n]="download"
+  else
+    missing+=("$n $v")
+  fi
+done
+
+# --- show the plan ------------------------------------------------------------------
+say ""
+for n in $(printf '%s\n' "${change[@]}" | sort); do
+  say "  change     $n ${cur[$n]} -> ${want[$n]}  (${source_of[$n]:-NOT FOUND})"
+done
+for n in $(printf '%s\n' "${reinstall[@]}" | sort); do
+  say "  reinstall  $n ${want[$n]}  (${source_of[$n]:-NOT FOUND})"
+done
+for n in $(printf '%s\n' "${remove[@]}" | sort); do
+  say "  remove     $n ${cur[$n]}  (added since the point)"
+done
+say ""
+
+if ((${#missing[@]})); then
+  err "these old packages are not in the cache, the local repo or any archive:"
+  printf '    %s\n' "${missing[@]}" >&2
+  if (( ! partial )); then
+    err "nothing was changed; rerun with --partial to restore everything else"
+    exit "$E_MISSING"
+  fi
+  say "--partial: continuing without them."
+fi
+
+if ((${#downloads[@]})); then
+  say "$((${#downloads[@]})) package(s) to download, about $(awk -v b="$dl_bytes" 'BEGIN { if (b < 1048576) printf "%d KiB", (b + 1023) / 1024; else printf "%.1f MiB", b / 1048576 }'):"
+  for d in "${downloads[@]}"; do say "    ${d%% *} $(cut -d' ' -f2 <<<"$d")  ${d##* }"; done
+  confirm "Download them?" || { say "Cancelled; nothing was changed."; exit "$E_CANCELLED"; }
+fi
+if ((${#remove[@]})); then
+  say "These packages were added after the point and will be removed: ${remove[*]}"
+fi
+confirm "Roll back to $(pretty "$point")?" || { say "Cancelled; nothing was changed."; exit "$E_CANCELLED"; }
+
+# --- do it ---------------------------------------------------------------------------
+# Omarchy's pacman guard only blocks system upgrades (-Syu); -U and -R are fine.
+if ((${#targets[@]})); then
+  if ! pacman -U --noconfirm "${targets[@]}"; then
+    err "pacman -U failed; packages may be partly rolled back (see above)"
+    exit "$E_PACMAN"
+  fi
+fi
+if ((${#remove[@]})); then
+  if ! pacman -R --noconfirm "${remove[@]}"; then
+    err "removing the packages added since the point failed (see above)"
+    exit "$E_PACMAN"
+  fi
+fi
+say "Rolled back to $(pretty "$point")."
+exit "$E_OK"

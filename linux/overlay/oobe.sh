@@ -69,11 +69,17 @@ if (( defaults )); then
 fi
 
 # --- pacman keyring: never shipped in the image (it would carry a private key)
+keyrings=()
+for k in archlinux omarchy womarchy; do
+  [[ -f /usr/share/pacman/keyrings/$k.gpg ]] && keyrings+=("$k")
+done
 if [[ ! -s /etc/pacman.d/gnupg/trustdb.gpg ]]; then
-  say "Initialising the pacman keyring"
-  pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinux omarchy >/dev/null 2>&1 ||
-    err "pacman keyring setup failed; run: sudo pacman-key --init && sudo pacman-key --populate archlinux omarchy"
+  say "Initialising the pacman keyring (${keyrings[*]})"
+  pacman-key --init >/dev/null 2>&1 && pacman-key --populate "${keyrings[@]}" >/dev/null 2>&1 ||
+    err "pacman keyring setup failed; run: sudo pacman-key --init && sudo pacman-key --populate ${keyrings[*]}"
 fi
+# With the womarchy key now trusted, [womarchy] can require signed databases.
+bash /usr/lib/womarchy/wsl/pacman.sh || err "pacman.conf setup failed; run: sudo womarchy-apply-system --reassert"
 
 # --- Windows hints (not with --defaults): user name and keyboard layouts -------
 win_user="" win_klids=()

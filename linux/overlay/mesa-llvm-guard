@@ -1,0 +1,47 @@
+#!/bin/bash
+# womarchy Mesa/LLVM guard (pacman hook 10-womarchy-mesa-llvm, PreTransaction on
+# an llvm-libs upgrade, AbortOnFail). womarchy's Mesa package (pkgrel with a '.',
+# e.g. 2.1) links libLLVM.so.<major>.<minor> but does not pin llvm-libs, so an
+# LLVM soname bump in Omarchy's snapshot would silently break the d3d12 driver.
+# Exit 1 (abort the transaction) when the llvm-libs about to be installed has a
+# different soname AND [womarchy] does not offer a newer Mesa in the same update.
+# Anything it cannot determine lets the transaction go ahead.
+set -uo pipefail
+export LC_ALL=C
+cat >/dev/null   # NeedsTargets: llvm-libs on stdin
+
+mesa_ver=$(pacman -Q mesa 2>/dev/null | awk '{ print $2 }')
+[[ -n $mesa_ver ]] || exit 0
+[[ ${mesa_ver##*-} == *.* ]] || exit 0   # Arch's own Mesa: rebuilt with LLVM in the same snapshot
+
+need=$(grep -aohE 'libLLVM\.so\.[0-9]+(\.[0-9]+)?' /usr/lib/libgallium-*.so 2>/dev/null | sort -u | head -n1)
+[[ -n $need ]] || exit 0
+
+# Field of the first `pacman -Si` entry: the repo pacman installs from.
+first_si() { pacman -Si "$1" 2>/dev/null | awk -F' *: ' -v k="$2" '$1 == k { print $2; exit }'; }
+new_ver=$(first_si llvm-libs Version)
+[[ -n $new_ver ]] || exit 0
+base=${new_ver#*:}
+base=${base%%-*}
+IFS=. read -r major minor _ <<<"$base"
+new_so="libLLVM.so.$major.${minor:-0}"
+[[ $new_so == "$need" ]] && exit 0
+
+# A newer womarchy Mesa (built for the new LLVM) comes with the same update.
+if [[ $(first_si mesa Repository) == womarchy ]]; then
+  offered=$(first_si mesa Version)
+  if [[ -n $offered ]] && (( $(vercmp "$offered" "$mesa_ver") > 0 )); then exit 0; fi
+fi
+
+cat >&2 <<MSG
+
+==> womarchy stopped this update to keep your GPU driver working.
+    llvm-libs would be upgraded to $new_ver, which provides $new_so.
+    womarchy's Mesa ($mesa_ver) is built against $need, so after this update the
+    d3d12 GPU driver would fail to load (no GPU acceleration, possibly no desktop).
+    Nothing was changed. womarchy will publish a Mesa build for the new LLVM; see
+    https://github.com/sytelus/womarchy/issues?q=label%3Arebuild-needed
+    and run the update again later.
+
+MSG
+exit 1

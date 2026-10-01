@@ -1,0 +1,12 @@
+# Populate pacman's keyring with the womarchy key, but only when that keyring is
+# initialised (a fresh image has none until its first-run setup runs
+# `pacman-key --init`; the setup then populates womarchy itself).
+post_upgrade() {
+  if usr/bin/pacman-key -l >/dev/null 2>&1; then
+    usr/bin/pacman-key --populate womarchy
+  fi
+}
+
+post_install() {
+  post_upgrade
+}

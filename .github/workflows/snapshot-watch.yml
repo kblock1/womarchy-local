@@ -31,7 +31,7 @@ jobs:
         run: |
           fp=$(for r in core extra; do curl -fsSL "$SNAPSHOT/$r/os/x86_64/$r.db" | sha256sum; done |
                sha256sum | cut -c1-16)
-          repo=$(curl -fsSL https://github.com/sytelus/womarchy/releases/download/repo/womarchy.db |
+          repo=$(curl -fsSL https://github.com/sytelus/womarchy/releases/download/packages/womarchy.db |
                  sha256sum | cut -c1-16)
           echo "key=snapshot-$fp-repo-$repo" >> "$GITHUB_OUTPUT"
 
@@ -48,9 +48,11 @@ jobs:
         run: |
           set -uo pipefail
           echo "Server = $SNAPSHOT/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
-          # our repository first, as on installed systems (signature checks are not the point here)
-          sed -i '/^\[core\]/i [womarchy]\nSigLevel = Optional TrustAll\nServer = https://github.com/sytelus/womarchy/releases/download/repo\n' /etc/pacman.conf
+          # our signed repository first, configured as on installed systems
+          sed -i '/^\[core\]/i [womarchy]\nSigLevel = PackageOptional DatabaseRequired\nServer = https://github.com/sytelus/womarchy/releases/download/packages\n' /etc/pacman.conf
           pacman-key --init && pacman-key --populate archlinux
+          curl -fsSL "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/linux/packages/womarchy-keyring/womarchy.asc" | pacman-key --add -
+          pacman-key --lsign-key EB71032617BBA1C4C8EE77C3047A25C1135F969D
           report=$(mktemp)
           {
             if ! pacman -Syyuu --noconfirm; then

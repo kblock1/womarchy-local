@@ -9,20 +9,21 @@
 #    satisfies the dependency without installing any of it. `omarchy-snapshot`
 #    then exits 127, which `omarchy update` treats as "no snapshots".
 #  - Kernels never belong in a WSL distro (WSL boots Microsoft's kernel).
-#  - Overlay: womarchy-apply-system, womarchy-provision-user, the WSL leaves
-#    (/usr/lib/womarchy/wsl), user templates (/usr/lib/womarchy/user), OOBE.
+#  - Overlay: womarchy-apply-system, womarchy-provision-user, womarchy-rollback,
+#    the WSL leaves (/usr/lib/womarchy/wsl), user templates (/usr/lib/womarchy/user),
+#    OOBE, and pacman hooks (rollback points, Mesa/LLVM guard, WSLg app hiding).
 #
-# Local source: linux/image/build-image.sh packs linux/overlay into
-# womarchy-overlay.tar.gz next to this PKGBUILD before running makepkg.
+# Local source: prepare-sources.sh (run by linux/packages/build-all.sh) packs
+# linux/overlay into womarchy-overlay.tar.gz next to this PKGBUILD.
 
 pkgname=womarchy-compat
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc='Omarchy on WSL: bootloader/snapshot stand-ins and the womarchy WSL overlay'
 arch=(any)
 url='https://github.com/sytelus/womarchy'
 license=(MIT)
-depends=(bash jq perl pacman systemd sudo iproute2 desktop-file-utils)
+depends=(bash jq perl pacman systemd sudo iproute2 desktop-file-utils curl womarchy-keyring)
 optdepends=('omarchy: the desktop this overlay adapts'
             'womarchy-session: Hyprland session launcher and shared-memory mount'
             'mesa-utils: eglinfo, used to confirm the d3d12 GPU path')
@@ -33,14 +34,19 @@ source=(womarchy-overlay.tar.gz)
 sha256sums=('SKIP')
 
 package() {
-  local o="$srcdir/womarchy-overlay"
+  local o="$srcdir/womarchy-overlay" f
 
   install -Dm755 "$o/womarchy-apply-system" "$pkgdir/usr/bin/womarchy-apply-system"
   install -Dm755 "$o/womarchy-provision-user" "$pkgdir/usr/bin/womarchy-provision-user"
+  install -Dm755 "$o/womarchy-rollback" "$pkgdir/usr/bin/womarchy-rollback"
   install -Dm755 "$o/oobe.sh" "$pkgdir/usr/lib/womarchy/oobe.sh"
   install -Dm644 "$o/omarchy.ico" "$pkgdir/usr/lib/womarchy/omarchy.ico"
   install -Dm755 "$o/wslg-hide-apps" "$pkgdir/usr/lib/womarchy/wslg-hide-apps"
-  install -Dm644 "$o/hooks/90-womarchy-wslg-apps.hook" "$pkgdir/usr/share/libalpm/hooks/90-womarchy-wslg-apps.hook"
+  install -Dm755 "$o/rollback-point" "$pkgdir/usr/lib/womarchy/rollback-point"
+  install -Dm755 "$o/mesa-llvm-guard" "$pkgdir/usr/lib/womarchy/mesa-llvm-guard"
+  for f in "$o"/hooks/*.hook; do
+    install -Dm644 "$f" "$pkgdir/usr/share/libalpm/hooks/${f##*/}"
+  done
   # Fallbacks appended to the session PATH (real tools win): nm-online
   install -Dm755 "$o/bin/nm-online" "$pkgdir/usr/lib/womarchy/bin/nm-online"
   # GALLIUM_DRIVER=d3d12 for the user manager only when /dev/dxg exists

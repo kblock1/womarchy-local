@@ -1,0 +1,13 @@
+# womarchy: womarchy's Mesa is built against one LLVM; stop an llvm-libs upgrade
+# that would change LLVM's soname under it (the GPU driver would fail to load).
+[Trigger]
+Type = Package
+Operation = Upgrade
+Target = llvm-libs
+
+[Action]
+Description = Checking the LLVM upgrade against womarchy's Mesa...
+When = PreTransaction
+Exec = /usr/lib/womarchy/mesa-llvm-guard
+AbortOnFail
+NeedsTargets

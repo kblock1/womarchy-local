@@ -2,12 +2,18 @@
 # Build the womarchy packages into a local pacman repo (out/repo, repo name "womarchy").
 # Run inside an Arch (WSL) build distro as a regular user with passwordless sudo.
 #   build-all.sh [pkg...]      default: aquamarine hyprland mesa-womarchy womarchy-session
+#                                       womarchy-keyring womarchy-compat
+# A package directory may contain prepare-sources.sh, run in the build copy as
+# `prepare-sources.sh <repo root>` before makepkg (womarchy-compat packs linux/overlay).
+# arch=(any) packages compile nothing: they build with --nodeps and are not installed
+# on the build host; compiled ones are installed after building (hyprland builds
+# against our aquamarine).
 # Packages keep Arch's names; list [womarchy] first in pacman.conf so they take precedence.
 set -euo pipefail
 ROOT=${WOMARCHY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}  # repo root (as seen from the build distro)
 REPO=${WOMARCHY_REPO:-$ROOT/out/repo}
 WORK=${WOMARCHY_WORK:-$HOME/pkgbuild}
-PKGS=("${@:-aquamarine hyprland mesa-womarchy womarchy-session}")
+PKGS=("${@:-aquamarine hyprland mesa-womarchy womarchy-session womarchy-keyring womarchy-compat}")
 read -r -a PKGS <<<"${PKGS[*]}"
 
 sudo pacman -S --needed --noconfirm base-devel git >/dev/null
@@ -25,10 +31,16 @@ build() {
   local name=$1
   echo "=== $name"
   rm -rf "$WORK/$name"
+  [[ -f $ROOT/linux/packages/$name/PKGBUILD ]] || { echo "no PKGBUILD for $name in $ROOT/linux/packages"; exit 1; }
   cp -r "$ROOT/linux/packages/$name" "$WORK/$name"
   cd "$WORK/$name"
+  if [[ -f prepare-sources.sh ]]; then
+    bash prepare-sources.sh "$ROOT" || { echo "prepare-sources.sh failed for $name"; exit 1; }
+  fi
+  local any=0 deps=(-s)
+  if grep -qE '^arch=\(any\)' PKGBUILD; then any=1; deps=(--nodeps); fi
   # sources are pinned by sha256 (Mesa's .sig would need its maintainers' keys imported)
-  if ! nice -n 10 makepkg --config "$CONF" -sf --noconfirm --skippgpcheck --nocheck >"$WORK/$name.log" 2>&1; then
+  if ! nice -n 10 makepkg --config "$CONF" "${deps[@]}" -f --noconfirm --skippgpcheck --nocheck >"$WORK/$name.log" 2>&1; then
     tail -n 40 "$WORK/$name.log"
     echo "makepkg failed for $name (full log: $WORK/$name.log)"
     exit 1
@@ -45,8 +57,9 @@ build() {
   [ -e "${built[0]}" ] || { echo "no package produced for $name"; exit 1; }
   cp -f "${built[@]}" "$REPO/"
   (cd "$REPO" && repo-add -q -R womarchy.db.tar.gz "${built[@]}")
-  # later packages build against these (hyprland needs our aquamarine headers)
-  sudo pacman -U --noconfirm --needed "${built[@]}" >/dev/null
+  # later packages build against these (hyprland needs our aquamarine headers);
+  # arch=any packages (session, keyring, compat: units and pacman hooks) stay off the build host
+  if (( ! any )); then sudo pacman -U --noconfirm --needed "${built[@]}" >/dev/null; fi
   echo "built: ${built[*]}"
 }
 

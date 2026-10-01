@@ -16,7 +16,8 @@
 # A line in an all.sh that is not a plain `run_logged "$OMARCHY_INSTALL/..."`
 # call stops the run with an error rather than being guessed at.
 #
-# Settings come from /etc/womarchy/config (WOMARCHY_DOCKER, WOMARCHY_FIREWALL).
+# Settings come from /etc/womarchy/config (WOMARCHY_DOCKER, WOMARCHY_FIREWALL,
+# WOMARCHY_REPO_URL: the hosted [womarchy] repo, default the GitHub `packages` release).
 # A value given in the environment overrides the file and is saved to it, so the
 # post-update hook (whose sudo resets the environment) keeps honouring it.
 
@@ -32,6 +33,7 @@ Usage: womarchy-apply-system --install-user USER [--first-install|--upgrade]
 Environment / /etc/womarchy/config:
   WOMARCHY_DOCKER=1|0     enable docker.socket (0: Docker Desktop's WSL integration)
   WOMARCHY_FIREWALL=0|1   1: run Omarchy's config/firewall.sh (ufw) and stop masking ufw
+  WOMARCHY_REPO_URL=URL   the hosted [womarchy] repo (https://... or file:///...; a mirror or fork)
   WOMARCHY_SKIP_EXTRA="config/foo.sh ..."   skip more upstream leaves (this run only)
 USAGE
 }
@@ -59,20 +61,38 @@ export OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 
 # --- settings: environment > /etc/womarchy/config > default ---------------------------
 CONFIG=/etc/womarchy/config
-declare -A DEFAULTS=([WOMARCHY_DOCKER]=1 [WOMARCHY_FIREWALL]=0)
-config_value() {
-  [[ -f $CONFIG ]] || return 0
-  sed -n "s/^$1=\([01]\)[[:space:]]*\$/\1/p" "$CONFIG" | tail -n1
+declare -A DEFAULTS=([WOMARCHY_DOCKER]=1 [WOMARCHY_FIREWALL]=0
+                     [WOMARCHY_REPO_URL]=https://github.com/sytelus/womarchy/releases/download/packages)
+valid_setting() { # KEY VALUE
+  case $1 in
+    WOMARCHY_DOCKER|WOMARCHY_FIREWALL) [[ $2 == [01] ]] ;;
+    WOMARCHY_REPO_URL) [[ $2 =~ ^(https://[A-Za-z0-9.-]+|file://)/[A-Za-z0-9._~/%+-]*$ ]] ;;
+    *) return 1 ;;
+  esac
 }
-save_config() {
+config_value() { # last valid KEY=VALUE line of the file (invalid ones are ignored)
+  [[ -f $CONFIG ]] || return 0
+  local v
+  v=$(sed -n "s/^$1=//p" "$CONFIG" | tail -n1)
+  v=${v%"${v##*[![:space:]]}"}
+  if [[ -n $v ]] && ! valid_setting "$1" "$v"; then
+    echo "warning: ignoring invalid $1='$v' in $CONFIG" >&2
+    return 0
+  fi
+  printf '%s' "$v"
+}
+save_config() { # KEY VALUE (VALUE already validated; no sed: URLs contain / and &)
   install -d -m 0755 "${CONFIG%/*}"
   [[ -f $CONFIG ]] || install -m 0644 /dev/null "$CONFIG"
-  if grep -q "^$1=" "$CONFIG"; then sed -i "s/^$1=.*/$1=$2/" "$CONFIG"; else echo "$1=$2" >>"$CONFIG"; fi
+  local tmp
+  tmp=$(mktemp "$CONFIG.XXXXXX")
+  awk -v k="$1" -v v="$2" 'index($0, k "=") == 1 { if (!done) print k "=" v; done = 1; next } { print }
+    END { if (!done) print k "=" v }' "$CONFIG" >"$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$CONFIG"
 }
 for key in "${!DEFAULTS[@]}"; do
   value=${!key:-}
   if [[ -n $value ]]; then
-    [[ $value == [01] ]] || { echo "Error: $key must be 0 or 1 (got '$value')" >&2; exit 1; }
+    valid_setting "$key" "$value" || { echo "Error: invalid $key='$value'" >&2; exit 1; }
     if (( EUID == 0 && ! list_only )) && [[ $(config_value "$key") != "$value" ]]; then save_config "$key" "$value"; fi
   else
     value=$(config_value "$key")

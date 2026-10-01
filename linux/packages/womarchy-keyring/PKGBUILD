@@ -1,0 +1,23 @@
+# womarchy: the [womarchy] repository's signing key for pacman.
+# Installs the keyring files pacman-key reads (`pacman-key --populate womarchy`):
+# womarchy.gpg (the public key, from womarchy.asc), womarchy-trusted (fingerprint:
+# trust level; lsigned on populate) and womarchy-revoked. The private key lives only
+# in the CI signing environment.
+pkgname=womarchy-keyring
+pkgver=20261001
+pkgrel=1
+pkgdesc='womarchy package repository PGP keyring'
+arch=(any)
+url='https://github.com/sytelus/womarchy'
+license=(MIT)
+install=womarchy-keyring.install
+# womarchy.asc is read from $startdir, not listed in source=(): makepkg takes any
+# *.asc source for a detached signature and fails to "verify" it.
+source=(womarchy-trusted womarchy-revoked)
+sha256sums=('SKIP' 'SKIP')
+
+package() {
+  install -Dm644 "$startdir/womarchy.asc" "$pkgdir/usr/share/pacman/keyrings/womarchy.gpg"
+  install -Dm644 womarchy-trusted "$pkgdir/usr/share/pacman/keyrings/womarchy-trusted"
+  install -Dm644 womarchy-revoked "$pkgdir/usr/share/pacman/keyrings/womarchy-revoked"
+}

@@ -10,11 +10,15 @@
 #   CACHE=<dir>      persistent package cache (default /var/cache/womarchy-pkg)
 #   KEEP_ROOTFS=1    keep $WORK/rootfs after packing (for inspection)
 #   XZ_LEVEL=6       xz preset
-#   ALLOW_STOCK_PACKAGES=1  build even if $OUT/repo lacks womarchy-session, aquamarine,
-#                    hyprland or mesa (the image then gets stock Arch builds; not a product image)
+#   ALLOW_STOCK_PACKAGES=1  build even if $OUT/repo lacks aquamarine, hyprland, mesa or
+#                    womarchy-session (the image then gets stock Arch builds; not a product image)
+#   ALLOW_UNSIGNED_REPO=1   accept an unsigned $OUT/repo (lab images only, never a release)
 #
-# Steps: build womarchy-compat -> stage the [womarchy] repo ($OUT/repo +
-# womarchy-compat) -> trust Omarchy's signing key (pinned fingerprint) ->
+# $OUT/repo is the [womarchy] repo as published: packages built by
+# linux/packages/build-all.sh (including womarchy-compat and womarchy-keyring),
+# db and packages signed by CI, fetched with linux/packages/fetch-signed-db.sh.
+# Steps: verify and stage the signed [womarchy] repo -> trust Omarchy's and
+# womarchy's signing keys (pinned fingerprints) ->
 # pacstrap from Omarchy's frozen stable Arch snapshot + [omarchy] with
 # [womarchy] first -> womarchy-apply-system in the chroot -> WSL config ->
 # scrub machine-specific state -> tar | xz.
@@ -30,16 +34,19 @@ CACHE=${CACHE:-/var/cache/womarchy-pkg}
 LITE=${LITE:-0}
 XZ_LEVEL=${XZ_LEVEL:-6}
 ALLOW_STOCK_PACKAGES=${ALLOW_STOCK_PACKAGES:-0}
+ALLOW_UNSIGNED_REPO=${ALLOW_UNSIGNED_REPO:-0}
 ROOTFS=$WORK/rootfs
 STAGE_REPO=$WORK/repo
 IMAGE_REPO=/var/lib/womarchy/repo   # the installed system's local [womarchy] repo (see wsl/pacman.sh)
 BUILD_DATE=$(date -u +%Y%m%d)
 
-source "$HERE/omarchy-key.env"      # OMARCHY_KEY_FPR (pinned omarchy-keyring key)
+source "$HERE/omarchy-key.env"      # OMARCHY_KEY_FPR, WOMARCHY_KEY_FPR (pinned signing keys)
+KEY_DIR=$REPO/linux/packages/womarchy-keyring
 ARCH_MIRROR='https://stable-mirror.omarchy.org/$repo/os/$arch'   # Omarchy's frozen Arch snapshot (stable channel)
 OMARCHY_SERVERS=('https://pkgs.omarchy.org/stable/$arch' 'https://stable-mirror.omarchy.org/$repo/os/$arch')
 # Packages that must come from $OUT/repo (DRM-free compositor, patched Mesa, session).
-REQUIRED_WOMARCHY=(womarchy-session aquamarine hyprland mesa)
+REQUIRED_WOMARCHY=(womarchy-compat womarchy-keyring womarchy-session aquamarine hyprland mesa)
+STOCK_ALTERNATIVE=(womarchy-session aquamarine hyprland mesa)   # what ALLOW_STOCK_PACKAGES may waive
 
 # From install/omarchy-base.packages: hardware, networking and boot pieces WSL
 # provides or does not have (research §3.1, §10.4). NetworkManager/resolved are
@@ -63,10 +70,9 @@ log() { printf '\n\e[1;34m==> %s\e[0m\n' "$*"; }
 die() { printf '\e[1;31merror:\e[0m %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "run as root (inside the womarchy-build distro)"
-for c in pacstrap arch-chroot makepkg repo-add repo-remove bsdtar jq xz curl gpg runuser findmnt; do
+for c in pacstrap arch-chroot bsdtar jq xz curl gpg findmnt; do
   command -v "$c" >/dev/null || die "missing $c (run linux/image/setup-build-distro.sh)"
 done
-id builder &>/dev/null || die "missing user 'builder' (run linux/image/setup-build-distro.sh)"
 [[ $ROOTFS == /*/* && $ROOTFS != *..* ]] || die "refusing odd ROOTFS path '$ROOTFS'"
 
 # Mounts at or below $ROOTFS (pacstrap/arch-chroot bind /dev, /proc, /sys, /run there).
@@ -97,59 +103,39 @@ lock_down() {
 mkdir -p "$WORK" "$CACHE" "$OUT"
 remove_rootfs
 rm -rf --one-file-system "$STAGE_REPO" "$WORK/pkg"
-mkdir -p "$ROOTFS" "$STAGE_REPO" "$WORK/pkg"
+mkdir -p "$ROOTFS" "$STAGE_REPO"
 
-# --- 1. womarchy-compat ------------------------------------------------------------
-log "Building womarchy-compat"
-pkgsrc=$WORK/pkg/womarchy-compat
-mkdir -p "$pkgsrc"
-cp "$REPO/linux/packages/womarchy-compat/PKGBUILD" "$pkgsrc/"
-tar -C "$REPO/linux" --transform 's|^overlay|womarchy-overlay|' --owner=0 --group=0 \
-    -czf "$pkgsrc/womarchy-overlay.tar.gz" overlay
-chown -R builder: "$pkgsrc"
-runuser -u builder -- env -C "$pkgsrc" PKGDEST="$pkgsrc" SRCDEST="$pkgsrc" BUILDDIR="$pkgsrc/build" \
-  nice -n 10 makepkg -f --nodeps --noconfirm --noprogressbar >/dev/null
-compat_pkgs=("$pkgsrc"/womarchy-compat-*.pkg.tar.zst)
-[[ -f ${compat_pkgs[0]} ]] || die "womarchy-compat did not build"
-compat_pkg=${compat_pkgs[0]}
-
-# --- 2. [womarchy] repo: $OUT/repo (compositor + Mesa builds + session) + compat ---
+# --- 1. [womarchy] repo: $OUT/repo exactly as published (db + packages signed by CI) ---
 log "Staging the [womarchy] repo"
-if [[ -f $OUT/repo/womarchy.db.tar.gz ]]; then
-  # --no-preserve: a drvfs (/mnt/d) copy would otherwise carry 0777 modes.
-  cp -r --no-preserve=mode,ownership "$OUT/repo/." "$STAGE_REPO/"
-  # Debug packages never go in the image; drop them from the staged copy only.
-  # Packages are identified by name in the db and their files by the db's
-  # %FILENAME% (file names need not follow name-version: epochs are renamed).
-  mapfile -t dbg < <(bsdtar -tf "$STAGE_REPO/womarchy.db.tar.gz" | sed -n 's|^\([^/]*-debug\)-[^-/]*-[^-/]*/$|\1|p' | sort -u)
-  if ((${#dbg[@]})); then
-    mapfile -t dbg_files < <(bsdtar -xOf "$STAGE_REPO/womarchy.db.tar.gz" '*-debug-*/desc' | awk '/^%FILENAME%$/ { getline; print }')
-    repo-remove -q "$STAGE_REPO/womarchy.db.tar.gz" "${dbg[@]}"
-    for f in "${dbg_files[@]}"; do rm -f "$STAGE_REPO/$f" "$STAGE_REPO/$f.sig"; done
-  fi
+[[ -f $OUT/repo/womarchy.db ]] ||
+  die "no $OUT/repo/womarchy.db: build packages with linux/packages/build-all.sh, then fetch the signed db (linux/packages/fetch-signed-db.sh)"
+if (( ALLOW_UNSIGNED_REPO )); then
+  echo "warning: ALLOW_UNSIGNED_REPO=1: [womarchy] signatures are not checked (lab image, never a release)" >&2
 else
-  echo "no $OUT/repo/womarchy.db.tar.gz"
+  "$REPO/linux/packages/fetch-signed-db.sh" --verify-only "$OUT/repo" ||
+    die "$OUT/repo is not a validly signed womarchy repo (see linux/packages/fetch-signed-db.sh)"
 fi
-cp "$compat_pkg" "$STAGE_REPO/"
-repo-add -q "$STAGE_REPO/womarchy.db.tar.gz" "$STAGE_REPO/$(basename "$compat_pkg")"
-# pacman needs the plain .db/.files names; repo-add makes symlinks, which drvfs copies may have lost
-for n in db files; do
-  [[ -e $STAGE_REPO/womarchy.$n ]] || ln -sf "womarchy.$n.tar.gz" "$STAGE_REPO/womarchy.$n"
-done
+# -L: real files for repo-add's womarchy.db -> womarchy.db.tar.gz links;
+# --no-preserve: a drvfs (/mnt/d) copy would otherwise carry 0777 modes.
+cp -rL --no-preserve=mode,ownership "$OUT/repo/." "$STAGE_REPO/"
 lock_down "$STAGE_REPO"
 
 # Repo contents, read once into a variable (no `| grep -q` under pipefail: an early
 # grep exit SIGPIPEs the producer and the test silently fails).
-repo_listing=$(bsdtar -tf "$STAGE_REPO/womarchy.db.tar.gz")
+repo_listing=$(bsdtar -tf "$STAGE_REPO/womarchy.db")
 repo_version() { sed -n "s|^$1-\([^-/]*-[^-/]*\)/\$|\1|p" <<<"$repo_listing"; }
 echo "womarchy repo: $(grep -c '/$' <<<"$repo_listing") packages"
 # Every package the db lists must have its file (%FILENAME%) in the repo.
-repo_files=$(bsdtar -xOf "$STAGE_REPO/womarchy.db.tar.gz" '*/desc' | awk '/^%FILENAME%$/ { getline; print }')
+repo_files=$(bsdtar -xOf "$STAGE_REPO/womarchy.db" '*/desc' | awk '/^%FILENAME%$/ { getline; print }')
 while IFS= read -r f; do
   [[ -z $f || -f $STAGE_REPO/$f ]] || die "the womarchy db lists $f, but the file is not in the repo"
 done <<<"$repo_files"
 missing=()
-for p in "${REQUIRED_WOMARCHY[@]}"; do [[ -n $(repo_version "$p") ]] || missing+=("$p"); done
+for p in "${REQUIRED_WOMARCHY[@]}"; do
+  [[ -n $(repo_version "$p") ]] && continue
+  [[ " ${STOCK_ALTERNATIVE[*]} " == *" $p "* ]] || die "$OUT/repo lacks $p (build it with linux/packages/build-all.sh)"
+  missing+=("$p")
+done
 if ((${#missing[@]})); then
   (( ALLOW_STOCK_PACKAGES )) || die "$OUT/repo lacks ${missing[*]} (set ALLOW_STOCK_PACKAGES=1 to build with stock Arch packages)"
   echo "warning: building without womarchy ${missing[*]} (ALLOW_STOCK_PACKAGES=1)" >&2
@@ -180,6 +166,24 @@ if ! pacman-key --list-keys "$OMARCHY_KEY_FPR" &>/dev/null; then
   pacman-key --list-keys "$OMARCHY_KEY_FPR" >/dev/null || die "Omarchy key not trusted after bootstrap"
 fi
 
+# --- 3b. trust the womarchy repo key on the build host (pinned fingerprint) -----------
+primaries() { gpg --show-keys --with-colons "$1" 2>/dev/null |
+  awk -F: '$1 == "pub" { want = 1; next } want && $1 == "fpr" { print $10; want = 0 }' | sort -u; }
+key_trusted=$(sed -e 's/#.*//' "$KEY_DIR/womarchy-trusted" | cut -d: -f1 | grep -E '^[0-9A-F]{40}$' | sort -u || true)
+[[ $key_trusted == "$WOMARCHY_KEY_FPR" ]] || die "womarchy-trusted lists {${key_trusted//$'
+'/,}}, expected exactly $WOMARCHY_KEY_FPR"
+[[ $(primaries "$KEY_DIR/womarchy.asc") == "$WOMARCHY_KEY_FPR" ]] || die "womarchy.asc is not exactly the pinned key $WOMARCHY_KEY_FPR"
+if (( ALLOW_UNSIGNED_REPO )); then
+  womarchy_siglevel='Optional TrustAll'
+else
+  womarchy_siglevel='PackageOptional DatabaseRequired'
+  pacman-key --add "$KEY_DIR/womarchy.asc" >/dev/null 2>&1 || die "cannot add the womarchy key to the build host's keyring"
+  pacman-key --lsign-key "$WOMARCHY_KEY_FPR" >/dev/null 2>&1 || die "cannot locally sign the womarchy key"
+fi
+
+# Same-named package files from earlier local builds must not shadow the published ones.
+while IFS= read -r f; do [[ -n $f ]] && rm -f "$CACHE/$f" "$CACHE/$f.sig"; done <<<"$repo_files"
+
 # --- 4. pacstrap ---------------------------------------------------------------------
 conf=$WORK/pacman.conf
 {
@@ -192,7 +196,7 @@ conf=$WORK/pacman.conf
   echo
   echo "# [womarchy] first: its hyprland/aquamarine/mesa builds replace Arch's."
   echo "[womarchy]"
-  echo "SigLevel = Optional TrustAll"
+  echo "SigLevel = $womarchy_siglevel"
   echo "Server = file://$STAGE_REPO"
   for r in core extra multilib; do printf '\n[%s]\nServer = %s\n' "$r" "$ARCH_MIRROR"; done
   printf '\n[omarchy]\n'
@@ -229,6 +233,13 @@ for p in "${REQUIRED_WOMARCHY[@]}"; do
   [[ $have == "$want" ]] || die "$p: installed '${have:-none}', expected womarchy's $want"
 done
 
+# The shipped sync db carries its signature (pacman keeps womarchy.db.sig next to it).
+if (( ! ALLOW_UNSIGNED_REPO )); then
+  sync=$ROOTFS/var/lib/pacman/sync
+  pacman-key --verify "$sync/womarchy.db.sig" "$sync/womarchy.db" >/dev/null 2>&1 ||
+    die "the image's sync db $sync/womarchy.db has no valid signature"
+fi
+
 # --- 5. configure the system -----------------------------------------------------------
 log "Configuring the image"
 install -m 0644 "$HERE/rootfs/etc/wsl.conf" "$ROOTFS/etc/wsl.conf"
@@ -247,6 +258,10 @@ install -m 0644 "$HERE/rootfs/etc/womarchy/config" "$ROOTFS/etc/womarchy/config"
 install -d -m 0755 "$ROOTFS/var/lib/womarchy" "$ROOTFS$IMAGE_REPO"
 cp -r --no-preserve=mode,ownership "$STAGE_REPO/." "$ROOTFS$IMAGE_REPO/"
 lock_down "$ROOTFS$IMAGE_REPO"
+if (( ! ALLOW_UNSIGNED_REPO )); then
+  pacman-key --verify "$ROOTFS$IMAGE_REPO/womarchy.db.sig" "$ROOTFS$IMAGE_REPO/womarchy.db" >/dev/null 2>&1 ||
+    die "the image's local repo db has no valid signature"
+fi
 
 log "womarchy-apply-system in the chroot"
 mountpoint -q "$ROOTFS" || mount --bind "$ROOTFS" "$ROOTFS"   # arch-chroot wants a mountpoint
@@ -279,6 +294,7 @@ rm -f "$ROOTFS/etc/resolv.conf"                # WSL generates it
 # warns "database file ... does not exist" until the first `omarchy update`.
 rm -rf "$ROOTFS"/var/cache/pacman/pkg/* "$ROOTFS"/var/log/journal/*
 rm -rf "$ROOTFS"/root/* "$ROOTFS"/root/.[!.]* "$ROOTFS"/tmp/* "$ROOTFS"/var/tmp/*
+rm -rf "$ROOTFS/var/lib/womarchy/rollback"     # build-time points (pacstrap's 2nd transaction)
 # Backup files (repo-add's *.old, pacman's *.pacsave/*.pacnew) have no place in
 # an image; a package-owned file of that name is reported, not deleted.
 while IFS= read -r -d '' f; do
@@ -318,6 +334,6 @@ mv -f "$OUT/$name.part" "$OUT/$name"
 
 du -sh --apparent-size "$ROOTFS" | awk '{print "rootfs: " $1}'
 ls -la "$OUT/$name"
-for p in womarchy-compat "${REQUIRED_WOMARCHY[@]}"; do printf '%s ' "$(pacman -r "$ROOTFS" -Q "$p" 2>/dev/null || echo "$p:none")"; done; echo
+for p in "${REQUIRED_WOMARCHY[@]}"; do printf '%s ' "$(pacman -r "$ROOTFS" -Q "$p" 2>/dev/null || echo "$p:none")"; done; echo
 (( ${KEEP_ROOTFS:-0} )) || remove_rootfs
 echo "$OUT/$name"

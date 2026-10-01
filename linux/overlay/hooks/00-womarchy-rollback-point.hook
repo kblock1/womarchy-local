@@ -1,0 +1,13 @@
+# womarchy: save the installed package set before pacman changes it, so
+# `womarchy-rollback` can return to it. Never blocks a transaction (no AbortOnFail).
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Target = *
+
+[Action]
+Description = Saving a womarchy rollback point...
+When = PreTransaction
+Exec = /usr/lib/womarchy/rollback-point

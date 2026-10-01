@@ -1,5 +1,5 @@
 # Build womarchy's packages against Omarchy's package snapshot and publish them to the signed
-# [womarchy] pacman repository (the GitHub release tagged "repo").
+# [womarchy] pacman repository (the GitHub release tagged "packages").
 #
 # On demand only (Actions tab → packages → Run workflow), e.g. when snapshot-watch.yml opens a
 # "rebuild-needed" issue. Free on GitHub's runners for this public repository.
@@ -31,6 +31,7 @@ concurrency:
 env:
   SNAPSHOT_MIRROR: https://stable-mirror.omarchy.org/$repo/os/$arch
   SIGNING_KEY_FPR: EB71032617BBA1C4C8EE77C3047A25C1135F969D
+  RELEASE: packages
 
 jobs:
   build:
@@ -104,22 +105,34 @@ jobs:
           sign() { gpg --batch --yes --pinentry-mode loopback --passphrase '' --local-user "$SIGNING_KEY_FPR" --detach-sign "$1"; }
 
           mkdir -p repo && cd repo
-          gh release download repo --pattern 'womarchy.db.tar.gz' --pattern 'womarchy.files.tar.gz'
-          assets=$(gh release view repo --json assets --jq '.assets[].name')
-
-          # new packages: sign and add to the database
           new=()
           shopt -s nullglob
           for f in ../new/*.pkg.tar.zst; do cp "$f" .; new+=("$(basename "$f")"); done
-          for f in "${new[@]}"; do sign "$f"; done
-          ((${#new[@]} == 0)) || repo-add womarchy.db.tar.gz "${new[@]}"
 
-          # older packages still on the release without a signature (rollbacks download them)
+          # First publish only: create the signed `packages` release and seed it with every package of
+          # the old, unsigned `repo` release (which stays unsigned for v0.1.0 installs; see INSTALL-NOTES).
+          seeded=()
+          if ! gh release view "$RELEASE" >/dev/null 2>&1; then
+            gh release create "$RELEASE" --prerelease --title "[womarchy] pacman repository (signed)" \
+              --notes "The signed [womarchy] pacman repository that Omarchy-on-WSL installs update from. Not meant to be downloaded by hand: see the README."
+            for f in $(gh release view repo --json assets --jq '.assets[].name' | grep '\.pkg\.tar\.zst$'); do
+              [[ -e $f ]] || { gh release download repo --pattern "$f"; seeded+=("$f"); }
+            done
+          else
+            gh release download "$RELEASE" --pattern 'womarchy.db.tar.gz' --pattern 'womarchy.files.tar.gz'
+          fi
+          assets=$(gh release view "$RELEASE" --json assets --jq '.assets[].name')
+
+          # seeded and new packages: sign and add to the database (new ones last, so they win)
+          for f in "${seeded[@]}" "${new[@]}"; do sign "$f"; done
+          ((${#seeded[@]} + ${#new[@]} == 0)) || repo-add womarchy.db.tar.gz "${seeded[@]}" "${new[@]}"
+
+          # older packages on the release without a signature (rollbacks download them)
           old=()
           for f in $(grep '\.pkg\.tar\.zst$' <<<"$assets"); do
             [[ " ${new[*]} " == *" $f "* ]] && continue
             grep -qxF "$f.sig" <<<"$assets" && continue
-            gh release download repo --pattern "$f"
+            gh release download "$RELEASE" --pattern "$f"
             sign "$f"
             old+=("$f.sig")
             rm -f "$f"
@@ -132,6 +145,6 @@ jobs:
 
           upload=(womarchy.db womarchy.db.sig womarchy.db.tar.gz womarchy.db.tar.gz.sig
                   womarchy.files womarchy.files.sig womarchy.files.tar.gz womarchy.files.tar.gz.sig "${old[@]}")
-          for f in "${new[@]}"; do upload+=("$f" "$f.sig"); done
-          gh release upload repo "${upload[@]}" --clobber
+          for f in "${seeded[@]}" "${new[@]}"; do upload+=("$f" "$f.sig"); done
+          gh release upload "$RELEASE" "${upload[@]}" --clobber
           echo "published: ${new[*]:-(no new packages)}; signed ${#old[@]} older packages"

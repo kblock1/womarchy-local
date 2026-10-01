@@ -28,10 +28,33 @@ if (( EUID == 0 )); then
   [[ $first_repo == "[womarchy]" ]] && pass "[womarchy] is the first repo" || fail "first repo is $first_repo"
   check "IgnorePkg for kernels" grep -q '^IgnorePkg = linux linux-lts' /etc/pacman.conf
   check "pacman keyring initialised (OOBE)" pacman-key --list-keys "$OMARCHY_KEY_FPR"
+  # [womarchy] signatures: the pinned womarchy key, locally trusted; signed dbs required.
+  check "womarchy-keyring installed" pacman -Q womarchy-keyring
+  validity=$(gpg --homedir /etc/pacman.d/gnupg --no-permission-warning --batch --with-colons --list-keys "$WOMARCHY_KEY_FPR" 2>/dev/null |
+    awk -F: '$1 == "pub" { print $2; exit }')
+  [[ $validity == [fu] ]] && pass "womarchy key $WOMARCHY_KEY_FPR trusted in pacman's keyring" ||
+    fail "womarchy key not (fully) trusted in pacman's keyring (validity '${validity:-missing}')"
+  grep -qx "$WOMARCHY_KEY_FPR:4:" /usr/share/pacman/keyrings/womarchy-trusted &&
+    pass "womarchy-trusted is the pinned key" || fail "womarchy-trusted: $(cat /usr/share/pacman/keyrings/womarchy-trusted 2>&1)"
+  sig=$(awk '/^\[womarchy\]/{f=1;next} /^\[/{f=0} f && /^SigLevel/' /etc/pacman.conf)
+  [[ $sig == "SigLevel = PackageOptional DatabaseRequired" ]] && pass "[womarchy] $sig" || fail "[womarchy] ${sig:-no SigLevel}"
+  check "local repo db signature valid" pacman-key --verify /var/lib/womarchy/repo/womarchy.db.sig /var/lib/womarchy/repo/womarchy.db
+  check "sync db signature valid" pacman-key --verify /var/lib/pacman/sync/womarchy.db.sig /var/lib/pacman/sync/womarchy.db
+  # Rollback points and the Mesa/LLVM guard.
+  for h in 00-womarchy-rollback-point 10-womarchy-mesa-llvm; do
+    check "pacman hook $h" test -f /usr/share/libalpm/hooks/$h.hook
+  done
+  check "womarchy-rollback --list" bash -c 'womarchy-rollback --list >/dev/null || [[ $? == 5 ]]'
+  # Hyprland/aquamarine carry soname deps, so pacman refuses mismatched hyprutils & co. upgrades itself.
+  deps=$(pacman -Qi hyprland aquamarine 2>/dev/null | awk -F' *: ' '/^Depends On/ { print $2 }')
+  grep -qE 'libhyprutils\.so=[0-9]+-64' <<<"$deps" && grep -qE 'libaquamarine\.so=[0-9]+-64' <<<"$deps" &&
+    pass "hyprland/aquamarine keep soname dependencies" || fail "soname dependencies missing: $deps"
   # [womarchy]: hosted repo, then the local copy; the local copy must not be writable by users.
   repo=/var/lib/womarchy/repo
   block=$(awk '/^\[womarchy\]/{f=1;next} /^\[/{f=0} f' /etc/pacman.conf)
-  grep -qx 'Server = https://github.com/sytelus/womarchy/releases/download/repo' <<<"$block" &&
+  hosted=$(sed -n 's/^WOMARCHY_REPO_URL=//p' /etc/womarchy/config 2>/dev/null | tail -n1)
+  hosted=${hosted:-https://github.com/sytelus/womarchy/releases/download/packages}
+  [[ $(grep -m1 '^Server' <<<"$block") == "Server = $hosted" ]] &&
     grep -qx "Server = file://$repo" <<<"$block" && pass "[womarchy] servers: hosted + file://$repo" ||
     fail "[womarchy] servers: $(grep Server <<<"$block" | paste -sd' ')"
   check "local repo db present" test -f $repo/womarchy.db

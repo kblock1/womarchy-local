@@ -1,0 +1,32 @@
+#!/bin/bash
+# womarchy rollback point: save `pacman -Q` (the installed package set) to
+# /var/lib/womarchy/rollback/<UTC timestamp>.pkgs before a pacman transaction
+# (hook 00-womarchy-rollback-point). One point per update session: skipped when
+# the newest point is less than 30 minutes old (`omarchy update` runs several
+# transactions). Keeps the newest 5. Always exits 0: it must never block pacman.
+# Restore with: sudo womarchy-rollback
+dir=/var/lib/womarchy/rollback
+keep=5
+min_age=$((30 * 60))
+
+{
+  mkdir -p "$dir" && chmod 0755 "$dir" || exit 0
+  newest=$(find "$dir" -maxdepth 1 -name '*.pkgs' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1)
+  if [[ -n $newest ]] && (( $(date +%s) - ${newest%%.*} < min_age )); then
+    exit 0
+  fi
+  tmp=$(mktemp "$dir/.point.XXXXXX") || exit 0
+  if LC_ALL=C pacman -Q >"$tmp" 2>/dev/null && [[ -s $tmp ]]; then
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$dir/$(date -u +%Y%m%dT%H%M%SZ).pkgs"
+  else
+    rm -f "$tmp"
+  fi
+  # Prune to the newest $keep (names sort by time).
+  mapfile -t points < <(find "$dir" -maxdepth 1 -name '*.pkgs' -printf '%f\n' | sort)
+  while ((${#points[@]} > keep)); do
+    rm -f "$dir/${points[0]}"
+    points=("${points[@]:1}")
+  done
+} 2>/dev/null
+exit 0
