@@ -1,9 +1,10 @@
 # Upstream sources (fetched) and our working forks of them: patches/ is the source of truth
-upstream/
-src/
+# (anchored with a leading /: windows/omarchy/src/ is source code)
+/upstream/
+/src/
 
 # Build outputs
-out/
+/out/
 **/build/
 windows/omarchy/target/
 *.pkg.tar.zst
