@@ -7,5 +7,5 @@ contact_links:
     url: https://github.com/sytelus/womarchy/security/advisories/new
     about: Please don't file security problems as public issues.
   - name: Omarchy itself (not specific to WSL)
-    url: https://github.com/basecamp/omarchy/issues
+    url: https://github.com/omacom/omarchy/issues
     about: Problems that also happen on a regular Omarchy install.

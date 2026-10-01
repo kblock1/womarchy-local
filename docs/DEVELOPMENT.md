@@ -123,4 +123,4 @@ The signing key exists only as the `womarchy-repo` environment's secret. That en
    Release asset names must not contain `:`; `build-all.sh` already renames packages that would.
 5. Add a [CHANGELOG.md](../CHANGELOG.md) entry, update the status in [PLAN.md](PLAN.md), and add a [WORKLOG.md](WORKLOG.md) entry.
 
-The old `repo` release is the frozen, unsigned repository of v0.1.0. It only exists so those installs can move to the signed one; never add signatures or packages to it.
+The old `repo` release is the frozen, unsigned repository of v0.1.0. It only exists so those installs can move to the signed one: it holds just the `womarchy-compat`, `womarchy-keyring` and `womarchy-session` builds that make the move. Never add signatures to it (a v0.1.0 install has no key, so its pacman would refuse the database), and don't publish other updates there.

@@ -685,3 +685,28 @@ Decision: no default change. TROUBLESHOOTING documents the X11 opt-in for WebGL-
   - one WSLg feature request (supported zero-copy shared memory), with texts to copy into its form.
 
 **Waiting for the owner:** approval of the `packages` publish run. After it come the transition upload to `repo`, the release image build, testing it, and release v0.2.0.
+
+### 28. Publishing v0.2.0: the signed repository goes live, a migration wart, and a "regression" that was a locked screen (2026-10-01)
+
+**The first signed publish failed, twice in one line.** The approved `packages` run created the empty `packages` release, then stopped:
+- **Bug 1:** `repo-add` makes `womarchy.db` a symlink to `womarchy.db.tar.gz`, and our `cp womarchy.db.tar.gz womarchy.db` copied the file onto itself ("same file").
+- **Bug 2, hidden behind it:** a re-run would have failed too. The release now existed, so the job would have tried to download a database that was never uploaded, instead of seeding the packages from `repo`.
+- **Fix:** the job removes the symlinks and uploads real copies, and seeds the packages from `repo` whenever the release has no database yet. The re-run published 30 assets.
+- **Verified with a throwaway pacman config:** it syncs the signed database, and refuses one whose bytes were changed.
+
+**Migration from v0.1.0, tested on a real v0.1.0 install:** the update moved it to the signed repository by itself. One wart: the first sync afterwards printed "missing required signature" once, for the unsigned database still in pacman's cache. `womarchy-compat` 0.4.1 deletes a cached `[womarchy]` database that has no `.sig` when it switches the repository to signed. The transition release `repo` now holds compat 0.4.1, the keyring and session 15, and still no signatures.
+
+**Release image:** built from the signed repository (compat 0.4.1, keyring, session 15, aquamarine `1.9`, Hyprland `4.6`, Mesa `2.1` builds). `linux/image/test-image.ps1`: 0 failures. The v0.1.0 image is kept for migration tests.
+
+**The 4 FPS release candidate** (story 14 in [JOURNEY.md](JOURNEY.md)):
+- **Symptom:** on a fresh install of that image, the clipboard test failed 5/5 and es2gears ran at ~4 FPS. Hyprland logged "frame N was never acknowledged", i.e. its 250 ms ack fallback.
+- **Ruled out:** the v0.1.0 `omarchy.exe` gave the same ~3.9 FPS, and the package diff between the v0.1.0 and v0.2.0 images held only our own packages.
+- **Cause:** Windows was locked (`LogonUI` running, no input for 34 minutes). Presents stall and the clipboard can't be opened while locked.
+- **Change:** the tests that show the desktop now stop early on a locked screen (`lab/assert-desktop.ps1`; with `throw`, because `exit` in a dot-sourced file only leaves that file).
+
+**README demo GIF tooling:**
+- `omarchy.exe --input-script` gained `mark TEXT`, which logs a timestamp so recordings can be cut into scenes.
+- `lab/demo-gif.ps1` runs `lab/scripts-omarchy-demo.txt` in a window. `lab/demo-record.sh` screenshots the desktop from inside the session with grim, which avoids window borders and DPI scaling of a Windows-side capture.
+- `lab/make-demo-gif.py` adds a title card and a caption per scene. It uses one palette for all frames and merges identical ones, which keeps the GIF small.
+
+**Project:** new README (highlights, install and use, the work-in-progress warning, a diagram); contributions through issues only, with a "fix, if you have one" field in the issue forms; `docs/JOURNEY.md`.

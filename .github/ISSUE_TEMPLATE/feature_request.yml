@@ -13,6 +13,7 @@ body:
     id: idea
     attributes:
       label: Ideas for how it could work
+      description: Code is welcome here too (a patch or a link to your branch); we don't accept pull requests directly.
   - type: dropdown
     id: area
     attributes:

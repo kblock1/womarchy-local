@@ -15,7 +15,7 @@ Companion to [FEASIBILITY.md](FEASIBILITY.md) (read that first for the evidence)
 - No replacement of Microsoft binaries.
 - Must coexist with the user's other WSL distros without affecting them or system performance while idle.
 
-**Status (2026-10-01; details in [WORKLOG.md](WORKLOG.md)):**
+**Status (2026-10-01; released: v0.1.0, v0.2.0; details in [WORKLOG.md](WORKLOG.md)):**
 
 | Milestone | State |
 |---|---|

@@ -41,7 +41,7 @@ Each with numbers and a reproducer from `lab/`:
 5. **DAX share first-touch cost grows with the amount mapped.** The first write to a page costs ~0.25 s per 33 MB buffer with nothing else mapped, and ~1 s once ~300 MB is mapped. Reproducer: `lab/bench-dax-alloc.c`.
 6. **Feature request: a supported zero-copy shared-memory API** between a WSL distro and Windows. Today we rely on WSLg's internal virtio-fs share (`wslg` tag) and its section names, which may change without notice. The request is a documented API or a stable contract for that share.
 
-## Omarchy (basecamp/omarchy)
+## Omarchy (omacom/omarchy)
 
 We don't fork Omarchy: the image runs its normal installer, and [linux/overlay](../linux/overlay) replaces the hardware-specific steps with WSL equivalents ("WSL leaves"). Candidates for small upstream PRs, each a no-op outside WSL:
 

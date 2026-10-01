@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for reporting! The [troubleshooting guide](https://github.com/sytelus/womarchy/blob/main/docs/TROUBLESHOOTING.md) covers common problems.
-        Problems with Omarchy itself that also happen outside WSL belong to [Omarchy](https://github.com/basecamp/omarchy/issues).
+        Problems with Omarchy itself that also happen outside WSL belong to [Omarchy](https://github.com/omacom/omarchy/issues).
   - type: textarea
     id: what
     attributes:
@@ -37,6 +37,11 @@ body:
     attributes:
       label: GPU and monitors
       placeholder: e.g. NVIDIA RTX 4070, two 4K monitors at 150%
+  - type: textarea
+    id: fix
+    attributes:
+      label: A fix, if you have one
+      description: We don't accept pull requests directly, so describe the change here, paste a patch, or link your branch.
   - type: checkboxes
     id: privacy
     attributes:

@@ -10,7 +10,8 @@
 - **Safer updates.** An update that would break the GPU driver (an LLVM bump Mesa wasn't built for) now stops with a clear message instead of leaving a broken desktop. A daily check notices when Omarchy's package snapshot moves ahead of womarchy's builds.
 
 **Project**
-- Continuous integration, issue forms, contributing and security guides.
+- Continuous integration, issue forms, contributing and security guides. Contributions come through issues; pull requests aren't accepted directly.
+- A new README, and [the journey](docs/JOURNEY.md): how this was built, the bugs, and how each was found and fixed.
 - New troubleshooting entries for browser 3D (WebGL), the microphone, and updates.
 
 ## 0.1.0 (2026-10-01)

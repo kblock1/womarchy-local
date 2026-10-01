@@ -1,11 +1,7 @@
-## What and why
+> [!NOTE]
+> **Thanks! This project doesn't accept pull requests directly.** Please
+> [open an issue](https://github.com/sytelus/womarchy/issues/new/choose) instead: describe the problem
+> and your change, and link this branch. If the change goes in, we make it and credit you.
+> See [CONTRIBUTING.md](https://github.com/sytelus/womarchy/blob/main/CONTRIBUTING.md).
 
-<!-- What does this change, and what problem does it solve? Link the issue if there is one. -->
-
-## How it was tested
-
-<!-- e.g. `cargo test`, a lab script (lab/*.ps1), a test distro. See docs/DEVELOPMENT.md#tests. -->
-
-- [ ] CI checks pass (they run automatically on this pull request)
-- [ ] Docs updated where behaviour changed (README, docs/, CHANGELOG.md)
-- [ ] Nothing private in the diff (user names, host names, local paths, tokens)
+<!-- Maintainers' own pull requests: say what changed and why, and how it was tested. -->
