@@ -66,6 +66,11 @@ fn desktop_running(distro: &str) -> bool {
     }
 }
 
+/// " --distro NAME" unless it's the default distro (for commands we suggest).
+fn distro_arg(distro: &str) -> String {
+    if distro.eq_ignore_ascii_case(&crate::default_distro()) { String::new() } else { format!(" --distro {}", distro) }
+}
+
 fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
@@ -165,7 +170,7 @@ pub fn backup(distro: &str, to: Option<&str>) -> i32 {
     }
     let file = dir.join(format!("{}-{}.tar", distro, timestamp()));
     println!("Backing up {} ({}) to {} ...", distro, used.map(gb).unwrap_or_else(|| "size unknown".into()), file.display());
-    println!("(This stops the {} distro: close any of its terminals first.)", distro);
+    println!("(This stops the {} distro: close any of its terminals first. A note that sockets can't be archived is harmless.)", distro);
     let start = Instant::now();
     let _ = wsl().args(["--terminate", distro]).stdout(Stdio::null()).status();
     if !wsl().arg("--export").arg(distro).arg(&file).status().is_ok_and(|s| s.success()) {
@@ -178,7 +183,7 @@ pub fn backup(distro: &str, to: Option<&str>) -> i32 {
     }
     let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
     println!("Backup done in {} s ({}): {}", start.elapsed().as_secs(), gb(size), file.display());
-    println!("Restore it with:  omarchy restore{}", if distro == crate::default_distro() { String::new() } else { format!(" --distro {}", distro) });
+    println!("Restore it with:  omarchy restore{}", distro_arg(distro));
     0
 }
 
@@ -227,7 +232,7 @@ pub fn restore(distro: &str, file: Option<&str>, yes: bool) -> i32 {
         eprintln!("omarchy: wsl --import failed. The backup file is untouched; run `omarchy restore` again.");
         return 1;
     }
-    println!("Restored in {} s. Start it with:  omarchy", start.elapsed().as_secs());
+    println!("Restored in {} s. Start it with:  omarchy{}", start.elapsed().as_secs(), distro_arg(distro));
     0
 }
 
@@ -251,10 +256,16 @@ pub fn update(distro: &str, backup_choice: Option<bool>, ask_again: bool) -> i32
         eprintln!("omarchy: the {} distro is not installed (omarchy install)", distro);
         return 1;
     }
+    // Omarchy's updater asks questions (confirm, sudo password, conflicts); without a terminal its
+    // prompts spin instead of failing
+    if !std::io::stdin().is_terminal() {
+        eprintln!("omarchy: run `omarchy update` in a terminal window: the updater asks questions");
+        return 2;
+    }
     let remembered = if ask_again { None } else { setting(SETTING_BACKUP).map(|v| v == "yes") };
     let backup_first = match backup_choice.or(remembered) {
         Some(b) => b,
-        None if std::io::stdin().is_terminal() => {
+        None => {
             let size = used_bytes(distro).map(gb).unwrap_or_else(|| "several GB".into());
             println!("Updates can be undone in two ways:");
             println!("  * `omarchy rollback` puts back the package versions from before the update.");
@@ -266,7 +277,6 @@ pub fn update(distro: &str, backup_choice: Option<bool>, ask_again: bool) -> i32
             println!("Remembered. (`omarchy update --ask` asks again; --backup / --no-backup decide for one update.)\n");
             yes
         }
-        None => false,
     };
     if backup_first {
         if desktop_running(distro) {
