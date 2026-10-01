@@ -5,6 +5,7 @@
 # As root it checks the system; as a user it checks that user's session.
 # Prints PASS/FAIL/WARN per check; exits non-zero if any FAIL.
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/omarchy-key.env"   # OMARCHY_KEY_FPR
 fails=0
 pass() { printf 'PASS  %s\n' "$*"; }
 fail() { printf 'FAIL  %s\n' "$*"; fails=$((fails + 1)); }
@@ -26,7 +27,28 @@ if (( EUID == 0 )); then
   first_repo=$(grep -m1 -E '^\[[a-z]+\]' <(grep -v '^\[options\]' /etc/pacman.conf))
   [[ $first_repo == "[womarchy]" ]] && pass "[womarchy] is the first repo" || fail "first repo is $first_repo"
   check "IgnorePkg for kernels" grep -q '^IgnorePkg = linux linux-lts' /etc/pacman.conf
-  check "pacman keyring initialised (OOBE)" pacman-key --list-keys 40DFB630FF42BCFFB047046CF0134EE680CAC571
+  check "pacman keyring initialised (OOBE)" pacman-key --list-keys "$OMARCHY_KEY_FPR"
+  # [womarchy]: hosted repo, then the local copy; the local copy must not be writable by users.
+  repo=/var/lib/womarchy/repo
+  block=$(awk '/^\[womarchy\]/{f=1;next} /^\[/{f=0} f' /etc/pacman.conf)
+  grep -qx 'Server = https://github.com/sytelus/womarchy/releases/download/repo' <<<"$block" &&
+    grep -qx "Server = file://$repo" <<<"$block" && pass "[womarchy] servers: hosted + file://$repo" ||
+    fail "[womarchy] servers: $(grep Server <<<"$block" | paste -sd' ')"
+  check "local repo db present" test -f $repo/womarchy.db
+  bad=$(find $repo /var/lib/womarchy \( -perm /022 -o ! -user root \) ! -type l 2>/dev/null | head -5)
+  [[ -z $bad ]] && pass "local repo root-owned, not group/other-writable" || fail "writable/non-root in repo: $bad"
+  old=$(find $repo -name '*.old' | head -3)
+  [[ -z $old ]] && pass "no *.old in the repo" || fail "*.old in repo: $old"
+  [[ ! -e /var/cache/womarchy-repo ]] && pass "no repo left in /var/cache" || fail "/var/cache/womarchy-repo still exists"
+  # The post-update hook's path on the live system: reassert must succeed, keep the
+  # system running, and leave Omarchy's install log closed (0640, not 0666).
+  if out=$(womarchy-apply-system --reassert 2>&1); then pass "womarchy-apply-system --reassert (live)"; else fail "reassert: $out"; fi
+  m=$(stat -c %a /var/log/omarchy-install.log 2>/dev/null)
+  [[ $m == 640 ]] && pass "omarchy-install.log mode 640 after reassert" || fail "omarchy-install.log mode ${m:-missing}"
+  state=$(systemctl is-system-running 2>/dev/null)
+  [[ $state == running ]] && pass "still running after reassert" || fail "after reassert: $state"
+  check "settings file /etc/womarchy/config" grep -q '^WOMARCHY_DOCKER=' /etc/womarchy/config
+  check "womarchy's masks are recorded" test -s /var/lib/womarchy/masked-units
   for u in NetworkManager systemd-resolved systemd-networkd sddm cups avahi-daemon power-profiles-daemon bluetooth; do
     s=$(systemctl is-enabled "$u.service" 2>/dev/null)
     [[ $s == masked || -z $s || $s == not-found ]] && pass "$u: ${s:-absent}" || fail "$u: $s"
@@ -39,9 +61,23 @@ if (( EUID == 0 )); then
   else
     warn "womarchy-session not installed (no shared-memory mount)"
   fi
-  check "GALLIUM_DRIVER in environment.d" grep -q '^GALLIUM_DRIVER=d3d12' /etc/environment.d/10-womarchy-gpu.conf
+  gen=/usr/lib/systemd/user-environment-generators/60-womarchy-gpu
+  check "GPU user environment generator" test -x $gen
+  [[ ! -e /etc/environment.d/10-womarchy-gpu.conf ]] && pass "no unconditional GALLIUM_DRIVER in environment.d" ||
+    fail "/etc/environment.d/10-womarchy-gpu.conf still sets GALLIUM_DRIVER unconditionally"
+  with=$(env -i "$gen"); without=$(env -i WOMARCHY_DXG=/nonexistent "$gen")
+  [[ $with == *GALLIUM_DRIVER=d3d12* && $without != *GALLIUM_DRIVER* && $without == *GSK_RENDERER=ngl* ]] &&
+    pass "generator: d3d12 only with /dev/dxg" || fail "generator output: with dxg [$with] without [$without]"
   check "pipewire WSLg tunnel config" test -f /etc/pipewire/pipewire.conf.d/50-womarchy-wslg.conf
-  grep -q '^XKBLAYOUT=' /etc/vconsole.conf && pass "vconsole.conf $(grep '^XKB' /etc/vconsole.conf | paste -sd' ')" || fail "vconsole.conf"
+  if grep -q '^XKBLAYOUT=' /etc/vconsole.conf; then
+    lay=$(sed -n 's/^XKBLAYOUT=//p' /etc/vconsole.conf); ok=1
+    for l in ${lay//,/ }; do
+      awk -v n="$l" '/^! /{s=$2;next} s=="layout" && $1==n {f=1} END{exit !f}' /usr/share/X11/xkb/rules/base.lst || ok=0
+    done
+    ((ok)) && pass "vconsole.conf $(grep '^XKB' /etc/vconsole.conf | paste -sd' ') (valid XKB)" || fail "vconsole.conf layout '$lay' not in base.lst"
+  else
+    fail "vconsole.conf has no XKBLAYOUT"
+  fi
   check "locale en_US.UTF-8 generated" bash -c 'locale -a | grep -qix en_US.utf8' 
   grep -q '^\[user\]' /etc/wsl.conf && pass "wsl.conf default user: $(sed -n 's/^default=//p' /etc/wsl.conf)" || fail "wsl.conf [user]"
   check "OOBE completed" test -f /var/lib/womarchy/oobe-done
@@ -94,6 +130,10 @@ else
   fi
   command -v hyprctl >/dev/null && pass "hyprctl present ($(hyprctl version -j 2>/dev/null | jq -r .tag 2>/dev/null || echo 'no instance'))" || warn "hyprctl absent"
 
+  ume=$(systemctl --user show-environment 2>/dev/null)
+  [[ -e /dev/dxg ]] && grep -qx GALLIUM_DRIVER=d3d12 <<<"$ume" && grep -qx GSK_RENDERER=ngl <<<"$ume" &&
+    pass "user manager env: GALLIUM_DRIVER=d3d12 GSK_RENDERER=ngl (from the generator)" ||
+    fail "user manager env: $(grep -E '^(GALLIUM_DRIVER|GSK_RENDERER)=' <<<"$ume" | paste -sd' ')"
   # GPU: GALLIUM_DRIVER from the login environment (profile.d), not set by hand.
   gd=$(bash -lc 'echo "$GALLIUM_DRIVER"')
   renderer=$(bash -lc 'eglinfo -B -p surfaceless 2>&1' | grep -m1 'OpenGL core profile renderer' | sed 's/.*renderer: //')

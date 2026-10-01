@@ -18,12 +18,25 @@
 
 set -euo pipefail
 
+usage() {
+  cat <<'USAGE'
+Usage: womarchy-provision-user [--force] [--overlay-only]
+
+Per-user setup for Omarchy on WSL, run as the user:
+  1. upstream `omarchy-provision-user --first-install` (OMARCHY_SETUP_CONTEXT=wsl);
+     OMARCHY_USER_NAME / OMARCHY_USER_EMAIL feed git and XCompose
+  2. the WSL user overlay from /usr/lib/womarchy/user (hypr bindings and
+     monitors, uwsm env, shell.json, Omarchy menu, update hooks, lite profile)
+--overlay-only  skip step 1        --force  run again although already done
+USAGE
+}
+
 force=0 overlay_only=0
 while (($#)); do
   case "$1" in
     --force) force=1; shift ;;
     --overlay-only) overlay_only=1; shift ;;
-    -h|--help) sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done

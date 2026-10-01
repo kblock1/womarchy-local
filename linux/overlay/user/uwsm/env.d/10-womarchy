@@ -2,10 +2,9 @@
 # starts (after Omarchy's /usr/share/uwsm/env.d/10-omarchy). Managed by
 # womarchy-provision-user; put personal additions in another env.d file.
 
-# GPU: Mesa's d3d12 driver on the host GPU (Arch Mesa defaults to llvmpipe).
-export GALLIUM_DRIVER="${GALLIUM_DRIVER:-d3d12}"
-# GTK4: GL renderer; its Vulkan path would run on the non-conformant Dozen driver.
-export GSK_RENDERER="${GSK_RENDERER:-ngl}"
+# GPU: GALLIUM_DRIVER=d3d12 (only with /dev/dxg) and GSK_RENDERER=ngl come from
+# the 60-womarchy-gpu user environment generator, i.e. from the user manager's
+# environment, which uwsm starts from.
 
 # Audio: WSL points PULSE_SERVER at WSLg's server. Inside the desktop, go through
 # PipeWire instead (it tunnels to WSLg), so pactl/wpctl, the Quickshell audio

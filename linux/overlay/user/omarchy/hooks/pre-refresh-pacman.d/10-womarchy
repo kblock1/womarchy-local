@@ -1,6 +1,7 @@
 #!/bin/bash
 # womarchy: `omarchy refresh pacman` / channel switches just rewrote
 # /etc/pacman.conf from Omarchy's template. Re-add the [womarchy] repo (first)
-# and the kernel IgnorePkg line before the upgrade runs. Managed by
-# womarchy-provision-user.
-sudo -n bash /usr/lib/womarchy/wsl/pacman.sh 2>/dev/null || sudo bash /usr/lib/womarchy/wsl/pacman.sh
+# and the kernel IgnorePkg line before the upgrade runs. Runs once, errors
+# visible. Managed by womarchy-provision-user.
+sudo -n true 2>/dev/null || echo "womarchy: sudo is needed to re-add the [womarchy] repository"
+sudo bash /usr/lib/womarchy/wsl/pacman.sh

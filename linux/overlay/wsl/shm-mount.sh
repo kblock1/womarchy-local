@@ -1,8 +1,8 @@
 # womarchy WSL leaf: WSLg shared-memory share at /mnt/wslgshm (check only).
 # The womarchy frame transport creates DAX-mapped files on the virtio-fs share
 # tagged "wslg" that Windows opens as sections (docs/WORKLOG.md §14). The unit
-# mnt-wslgshm.mount is owned by the womarchy-session package (statically
-# enabled via local-fs.target.wants, ConditionPathExists=/mnt/wslg, so it is
+# mnt-wslgshm.mount belongs to the womarchy-session package, which enables it
+# statically (multi-user.target.wants; ConditionPathExists=/mnt/wslg, so it is
 # skipped rather than failed without WSLg). The share root is 0777 once
 # mounted, so the session user needs nothing else. Never shadow that unit here.
 set -euo pipefail

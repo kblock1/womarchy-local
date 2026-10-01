@@ -10,8 +10,10 @@
 #   CACHE=<dir>      persistent package cache (default /var/cache/womarchy-pkg)
 #   KEEP_ROOTFS=1    keep $WORK/rootfs after packing (for inspection)
 #   XZ_LEVEL=6       xz preset
+#   ALLOW_STOCK_PACKAGES=1  build even if $OUT/repo lacks womarchy-session, aquamarine,
+#                    hyprland or mesa (the image then gets stock Arch builds; not a product image)
 #
-# Steps: build womarchy-compat -> stage the [womarchy] repo (lead's out/repo +
+# Steps: build womarchy-compat -> stage the [womarchy] repo ($OUT/repo +
 # womarchy-compat) -> trust Omarchy's signing key (pinned fingerprint) ->
 # pacstrap from Omarchy's frozen stable Arch snapshot + [omarchy] with
 # [womarchy] first -> womarchy-apply-system in the chroot -> WSL config ->
@@ -27,13 +29,17 @@ WORK=${WORK:-/var/tmp/womarchy-image}
 CACHE=${CACHE:-/var/cache/womarchy-pkg}
 LITE=${LITE:-0}
 XZ_LEVEL=${XZ_LEVEL:-6}
+ALLOW_STOCK_PACKAGES=${ALLOW_STOCK_PACKAGES:-0}
 ROOTFS=$WORK/rootfs
 STAGE_REPO=$WORK/repo
+IMAGE_REPO=/var/lib/womarchy/repo   # the installed system's local [womarchy] repo (see wsl/pacman.sh)
 BUILD_DATE=$(date -u +%Y%m%d)
 
-OMARCHY_KEY=40DFB630FF42BCFFB047046CF0134EE680CAC571   # omarchy-keyring signing key (docs/research/01-omarchy.md §2.1)
+source "$HERE/omarchy-key.env"      # OMARCHY_KEY_FPR (pinned omarchy-keyring key)
 ARCH_MIRROR='https://stable-mirror.omarchy.org/$repo/os/$arch'   # Omarchy's frozen Arch snapshot (stable channel)
 OMARCHY_SERVERS=('https://pkgs.omarchy.org/stable/$arch' 'https://stable-mirror.omarchy.org/$repo/os/$arch')
+# Packages that must come from $OUT/repo (DRM-free compositor, patched Mesa, session).
+REQUIRED_WOMARCHY=(womarchy-session aquamarine hyprland mesa)
 
 # From install/omarchy-base.packages: hardware, networking and boot pieces WSL
 # provides or does not have (research §3.1, §10.4). NetworkManager/resolved are
@@ -57,20 +63,40 @@ log() { printf '\n\e[1;34m==> %s\e[0m\n' "$*"; }
 die() { printf '\e[1;31merror:\e[0m %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "run as root (inside the womarchy-build distro)"
-for c in pacstrap arch-chroot makepkg repo-add repo-remove bsdtar jq xz curl gpg runuser; do
+for c in pacstrap arch-chroot makepkg repo-add repo-remove bsdtar jq xz curl gpg runuser findmnt; do
   command -v "$c" >/dev/null || die "missing $c (run linux/image/setup-build-distro.sh)"
 done
 id builder &>/dev/null || die "missing user 'builder' (run linux/image/setup-build-distro.sh)"
+[[ $ROOTFS == /*/* && $ROOTFS != *..* ]] || die "refusing odd ROOTFS path '$ROOTFS'"
 
+# Mounts at or below $ROOTFS (pacstrap/arch-chroot bind /dev, /proc, /sys, /run there).
+rootfs_mounts() { findmnt -rn -o TARGET | awk -v r="$ROOTFS" '$0 == r || index($0, r "/") == 1'; }
 unmount_rootfs() {
   local m
-  for m in $(findmnt -rn -o TARGET | grep "^$ROOTFS" | sort -r); do umount -l "$m" 2>/dev/null || true; done
+  for m in $(rootfs_mounts | sort -r); do umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true; done
+}
+# A /dev bind left under $ROOTFS would make `rm -rf` delete the device nodes every
+# distro in the WSL VM shares: never delete while anything is still mounted there.
+remove_rootfs() {
+  unmount_rootfs
+  local left
+  left=$(rootfs_mounts)
+  [[ -z $left ]] || die "still mounted under $ROOTFS, not deleting: $(paste -sd' ' <<<"$left")"
+  rm -rf --one-file-system "$ROOTFS"
 }
 trap unmount_rootfs EXIT
 
+# Owned by root, no group/other write: the [womarchy] repo is trusted (TrustAll)
+# and comes first, so a writable copy would let any user plant packages for root.
+lock_down() {
+  chown -R root:root "$1"
+  chmod -R u=rwX,go=rX "$1"
+  rm -f "$1"/*.old
+}
+
 mkdir -p "$WORK" "$CACHE" "$OUT"
-unmount_rootfs
-rm -rf "$ROOTFS" "$STAGE_REPO" "$WORK/pkg"
+remove_rootfs
+rm -rf --one-file-system "$STAGE_REPO" "$WORK/pkg"
 mkdir -p "$ROOTFS" "$STAGE_REPO" "$WORK/pkg"
 
 # --- 1. womarchy-compat ------------------------------------------------------------
@@ -83,19 +109,26 @@ tar -C "$REPO/linux" --transform 's|^overlay|womarchy-overlay|' --owner=0 --grou
 chown -R builder: "$pkgsrc"
 runuser -u builder -- env -C "$pkgsrc" PKGDEST="$pkgsrc" SRCDEST="$pkgsrc" BUILDDIR="$pkgsrc/build" \
   nice -n 10 makepkg -f --nodeps --noconfirm --noprogressbar >/dev/null
-compat_pkg=$(ls "$pkgsrc"/womarchy-compat-*.pkg.tar.zst | head -n1)
-[[ -f $compat_pkg ]] || die "womarchy-compat did not build"
+compat_pkgs=("$pkgsrc"/womarchy-compat-*.pkg.tar.zst)
+[[ -f ${compat_pkgs[0]} ]] || die "womarchy-compat did not build"
+compat_pkg=${compat_pkgs[0]}
 
-# --- 2. [womarchy] repo: the lead's out/repo (compositor + Mesa builds) + compat ---
+# --- 2. [womarchy] repo: $OUT/repo (compositor + Mesa builds + session) + compat ---
 log "Staging the [womarchy] repo"
 if [[ -f $OUT/repo/womarchy.db.tar.gz ]]; then
-  cp -a "$OUT/repo/." "$STAGE_REPO/"     # cp keeps epoch file names ("mesa-1:26...")
+  # --no-preserve: a drvfs (/mnt/d) copy would otherwise carry 0777 modes.
+  cp -r --no-preserve=mode,ownership "$OUT/repo/." "$STAGE_REPO/"
   # Debug packages never go in the image; drop them from the staged copy only.
+  # Packages are identified by name in the db and their files by the db's
+  # %FILENAME% (file names need not follow name-version: epochs are renamed).
   mapfile -t dbg < <(bsdtar -tf "$STAGE_REPO/womarchy.db.tar.gz" | sed -n 's|^\([^/]*-debug\)-[^-/]*-[^-/]*/$|\1|p' | sort -u)
-  ((${#dbg[@]})) && repo-remove -q "$STAGE_REPO/womarchy.db.tar.gz" "${dbg[@]}"
-  rm -f "$STAGE_REPO"/*-debug-*.pkg.tar.*
+  if ((${#dbg[@]})); then
+    mapfile -t dbg_files < <(bsdtar -xOf "$STAGE_REPO/womarchy.db.tar.gz" '*-debug-*/desc' | awk '/^%FILENAME%$/ { getline; print }')
+    repo-remove -q "$STAGE_REPO/womarchy.db.tar.gz" "${dbg[@]}"
+    for f in "${dbg_files[@]}"; do rm -f "$STAGE_REPO/$f" "$STAGE_REPO/$f.sig"; done
+  fi
 else
-  echo "no $OUT/repo: [womarchy] will carry womarchy-compat only (stock Arch hyprland/mesa)"
+  echo "no $OUT/repo/womarchy.db.tar.gz"
 fi
 cp "$compat_pkg" "$STAGE_REPO/"
 repo-add -q "$STAGE_REPO/womarchy.db.tar.gz" "$STAGE_REPO/$(basename "$compat_pkg")"
@@ -103,25 +136,48 @@ repo-add -q "$STAGE_REPO/womarchy.db.tar.gz" "$STAGE_REPO/$(basename "$compat_pk
 for n in db files; do
   [[ -e $STAGE_REPO/womarchy.$n ]] || ln -sf "womarchy.$n.tar.gz" "$STAGE_REPO/womarchy.$n"
 done
-echo "womarchy repo: $(bsdtar -tf "$STAGE_REPO/womarchy.db.tar.gz" | grep -c '/$') packages"
+lock_down "$STAGE_REPO"
+
+# Repo contents, read once into a variable (no `| grep -q` under pipefail: an early
+# grep exit SIGPIPEs the producer and the test silently fails).
+repo_listing=$(bsdtar -tf "$STAGE_REPO/womarchy.db.tar.gz")
+repo_version() { sed -n "s|^$1-\([^-/]*-[^-/]*\)/\$|\1|p" <<<"$repo_listing"; }
+echo "womarchy repo: $(grep -c '/$' <<<"$repo_listing") packages"
+# Every package the db lists must have its file (%FILENAME%) in the repo.
+repo_files=$(bsdtar -xOf "$STAGE_REPO/womarchy.db.tar.gz" '*/desc' | awk '/^%FILENAME%$/ { getline; print }')
+while IFS= read -r f; do
+  [[ -z $f || -f $STAGE_REPO/$f ]] || die "the womarchy db lists $f, but the file is not in the repo"
+done <<<"$repo_files"
+missing=()
+for p in "${REQUIRED_WOMARCHY[@]}"; do [[ -n $(repo_version "$p") ]] || missing+=("$p"); done
+if ((${#missing[@]})); then
+  (( ALLOW_STOCK_PACKAGES )) || die "$OUT/repo lacks ${missing[*]} (set ALLOW_STOCK_PACKAGES=1 to build with stock Arch packages)"
+  echo "warning: building without womarchy ${missing[*]} (ALLOW_STOCK_PACKAGES=1)" >&2
+fi
 
 # --- 3. trust Omarchy's packaging key on the build host (pinned fingerprint) -------
-if ! pacman-key --list-keys "$OMARCHY_KEY" &>/dev/null; then
+if ! pacman-key --list-keys "$OMARCHY_KEY_FPR" &>/dev/null; then
   log "Bootstrapping omarchy-keyring on the build host"
-  kr=$WORK/keyring; rm -rf "$kr"; mkdir -p "$kr"
+  kr=$WORK/keyring; rm -rf --one-file-system "$kr"; mkdir -p "$kr"
   curl -fsSL -o "$kr/omarchy.db" "https://pkgs.omarchy.org/stable/x86_64/omarchy.db"
   desc=$(bsdtar -xOf "$kr/omarchy.db" 'omarchy-keyring-*/desc')
   file=$(awk '/^%FILENAME%$/ {getline; print}' <<<"$desc")
   sum=$(awk '/^%SHA256SUM%$/ {getline; print}' <<<"$desc")
   curl -fsSL -o "$kr/$file" "https://pkgs.omarchy.org/stable/x86_64/$file"
   echo "$sum  $kr/$file" | sha256sum -c - >/dev/null || die "omarchy-keyring checksum mismatch"
-  # The package is only trusted if it carries exactly the pinned key.
-  bsdtar -xOf "$kr/$file" 'usr/share/pacman/keyrings/omarchy.gpg' |
-    gpg --show-keys --with-colons 2>/dev/null | grep -q "^fpr:::::::::$OMARCHY_KEY:" ||
-    die "omarchy-keyring does not contain the pinned key $OMARCHY_KEY"
+  # Trust the package only if it carries exactly the pinned key: the set of
+  # primary-key fingerprints in omarchy.gpg and the set in omarchy-trusted must
+  # both equal {OMARCHY_KEY_FPR} (no extra keys that `--populate` would lsign).
+  bsdtar -xOf "$kr/$file" 'usr/share/pacman/keyrings/omarchy.gpg' >"$kr/omarchy.gpg"
+  bsdtar -xOf "$kr/$file" 'usr/share/pacman/keyrings/omarchy-trusted' >"$kr/omarchy-trusted"
+  primaries=$(gpg --show-keys --with-colons "$kr/omarchy.gpg" 2>/dev/null |
+    awk -F: '$1 == "pub" { want = 1; next } want && $1 == "fpr" { print $10; want = 0 }' | sort -u)
+  trusted=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$kr/omarchy-trusted" | cut -d: -f1 | sort -u)
+  [[ $primaries == "$OMARCHY_KEY_FPR" ]] || die "omarchy.gpg keys are {${primaries//$'\n'/,}}, expected exactly $OMARCHY_KEY_FPR"
+  [[ $trusted == "$OMARCHY_KEY_FPR" ]] || die "omarchy-trusted lists {${trusted//$'\n'/,}}, expected exactly $OMARCHY_KEY_FPR"
   pacman -U --noconfirm "$kr/$file" >/dev/null
   pacman-key --populate omarchy >/dev/null
-  pacman-key --list-keys "$OMARCHY_KEY" >/dev/null || die "Omarchy key not trusted after bootstrap"
+  pacman-key --list-keys "$OMARCHY_KEY_FPR" >/dev/null || die "Omarchy key not trusted after bootstrap"
 fi
 
 # --- 4. pacstrap ---------------------------------------------------------------------
@@ -147,7 +203,7 @@ conf=$WORK/pacman.conf
 export OMARCHY_ALLOW_DIRECT_PACMAN=1
 
 session=()
-bsdtar -tf "$STAGE_REPO/womarchy.db.tar.gz" | grep -q '^womarchy-session-' && session=(womarchy-session)
+[[ -n $(repo_version womarchy-session) ]] && session=(womarchy-session)
 
 log "pacstrap (1/2): base + Omarchy + womarchy"
 nice -n 10 pacstrap -C "$conf" -c -G -M "$ROOTFS" \
@@ -158,27 +214,39 @@ omarchy_version=${omarchy_version%-*}
 base_list=$ROOTFS/usr/share/omarchy/install/omarchy-base.packages
 [[ -f $base_list ]] || die "missing $base_list"
 drop=("${DROP[@]}")
-(( LITE )) && drop+=("${LITE_DROP[@]}")
+if (( LITE )); then drop+=("${LITE_DROP[@]}"); fi
 mapfile -t base_pkgs < <(sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' "$base_list" |
   grep -vxF -f <(printf '%s\n' "${drop[@]}"))
 
 log "pacstrap (2/2): ${#base_pkgs[@]} of Omarchy's base packages (profile: $( ((LITE)) && echo lite || echo full))"
 nice -n 10 pacstrap -C "$conf" -c -G -M "$ROOTFS" --needed "${base_pkgs[@]}"
 
+# The womarchy builds must be what got installed (repo order is what decides).
+for p in "${REQUIRED_WOMARCHY[@]}"; do
+  want=$(repo_version "$p")
+  [[ -n $want ]] || continue
+  have=$(pacman -r "$ROOTFS" -Q "$p" 2>/dev/null | awk '{print $2}')
+  [[ $have == "$want" ]] || die "$p: installed '${have:-none}', expected womarchy's $want"
+done
+
 # --- 5. configure the system -----------------------------------------------------------
 log "Configuring the image"
 install -m 0644 "$HERE/rootfs/etc/wsl.conf" "$ROOTFS/etc/wsl.conf"
 install -m 0644 "$HERE/rootfs/etc/wsl-distribution.conf" "$ROOTFS/etc/wsl-distribution.conf"
-install -d "$ROOTFS/etc/womarchy"
+install -d -m 0755 "$ROOTFS/etc/womarchy"
 cat >"$ROOTFS/etc/womarchy/profile" <<EOF
 WOMARCHY_PROFILE=$( ((LITE)) && echo lite || echo full)
 OMARCHY_VERSION=$omarchy_version
 WOMARCHY_BUILD_DATE=$BUILD_DATE
 EOF
+install -m 0644 "$HERE/rootfs/etc/womarchy/config" "$ROOTFS/etc/womarchy/config"
 
-# The installed system's [womarchy] repo (hosted URL to follow; see wsl/pacman.sh).
-install -d "$ROOTFS/var/cache/womarchy-repo"
-cp -a "$STAGE_REPO/." "$ROOTFS/var/cache/womarchy-repo/"
+# The installed system's local [womarchy] repo (offline fallback behind the
+# hosted one; see wsl/pacman.sh). /var/lib, not /var/cache: cache cleaners must
+# not be able to remove a configured repo.
+install -d -m 0755 "$ROOTFS/var/lib/womarchy" "$ROOTFS$IMAGE_REPO"
+cp -r --no-preserve=mode,ownership "$STAGE_REPO/." "$ROOTFS$IMAGE_REPO/"
+lock_down "$ROOTFS$IMAGE_REPO"
 
 log "womarchy-apply-system in the chroot"
 mountpoint -q "$ROOTFS" || mount --bind "$ROOTFS" "$ROOTFS"   # arch-chroot wants a mountpoint
@@ -187,7 +255,8 @@ arch-chroot "$ROOTFS" env OMARCHY_LOG_TO_STDOUT=1 OMARCHY_MIRROR=stable OMARCHY_
   womarchy-apply-system --defer-provisioning --first-install
 
 # Sanity: the things the image must have.
-grep -q '^\[womarchy\]' "$ROOTFS/etc/pacman.conf" || die "[womarchy] missing from pacman.conf"
+first_repo=$(grep -m1 -E '^\[[A-Za-z0-9_-]+\]' <(grep -v '^\[options\]' "$ROOTFS/etc/pacman.conf"))
+[[ $first_repo == "[womarchy]" ]] || die "first pacman repo is '$first_repo', not [womarchy]"
 [[ -L $ROOTFS/etc/systemd/system/NetworkManager.service || ! -f $ROOTFS/usr/lib/systemd/system/NetworkManager.service ]] ||
   die "NetworkManager not masked"
 installed=$(pacman -r "$ROOTFS" -Qq)
@@ -195,8 +264,10 @@ for p in omarchy omarchy-settings womarchy-compat mesa vulkan-dzn pipewire-pulse
   grep -qx "$p" <<<"$installed" || die "package $p not installed"
 done
 for p in limine snapper linux; do
-  pacman -r "$ROOTFS" -Qi "$p" 2>/dev/null | grep -q '^Name *: '"$p"'$' && die "$p must not be installed"
+  if grep -qx "$p" <<<"$installed"; then die "$p must not be installed"; fi
 done
+writable=$(find "$ROOTFS$IMAGE_REPO" \( -perm /022 -o ! -user root \) ! -type l)
+[[ -z $writable ]] || die "group/other-writable or non-root files in $IMAGE_REPO: $writable"
 
 # --- 6. scrub machine-specific state (archlinux-wsl recipe) ------------------------------
 log "Scrubbing"
@@ -208,12 +279,35 @@ rm -f "$ROOTFS/etc/resolv.conf"                # WSL generates it
 # warns "database file ... does not exist" until the first `omarchy update`.
 rm -rf "$ROOTFS"/var/cache/pacman/pkg/* "$ROOTFS"/var/log/journal/*
 rm -rf "$ROOTFS"/root/* "$ROOTFS"/root/.[!.]* "$ROOTFS"/tmp/* "$ROOTFS"/var/tmp/*
-find "$ROOTFS/etc" -name '*.pacnew' -print
+# Backup files (repo-add's *.old, pacman's *.pacsave/*.pacnew) have no place in
+# an image; a package-owned file of that name is reported, not deleted.
+while IFS= read -r -d '' f; do
+  if pacman -r "$ROOTFS" -Qqo "${f#"$ROOTFS"}" &>/dev/null; then
+    echo "note: keeping package-owned ${f#"$ROOTFS"}"
+  else
+    echo "removing ${f#"$ROOTFS"}"; rm -f "$f"
+  fi
+done < <(find "$ROOTFS/etc" "$ROOTFS/var" -xdev \( -name '*.old' -o -name '*.pacnew' -o -name '*.pacsave' \) -print0)
+
+# Nothing machine- or owner-specific may ship (lab/overlay/privacy-scan.sh does the
+# full string scan for releases). machine-id stays absent: systemd creates it at first boot.
+privacy_leaks() {
+  local r=$1 p
+  for p in etc/machine-id var/lib/dbus/machine-id etc/hostname etc/pacman.d/gnupg; do
+    [[ -e $r/$p ]] && echo "$p"
+  done
+  find "$r/root" "$r/home" "$r/var/log/journal" -mindepth 1 -maxdepth 1 2>/dev/null
+  find "$r/etc/ssh" -name 'ssh_host_*key*' 2>/dev/null
+  true
+}
+leaks=$(privacy_leaks "$ROOTFS")
+[[ -z $leaks ]] || die "machine-specific files left in the image: $(paste -sd' ' <<<"$leaks")"
 
 # --- 7. pack ------------------------------------------------------------------------------
 suffix=$( ((LITE)) && echo -lite || true)
 name="Omarchy-${omarchy_version}-womarchy-${BUILD_DATE}${suffix}.wsl"
 unmount_rootfs
+[[ -z $(rootfs_mounts) ]] || die "still mounted under $ROOTFS: $(rootfs_mounts | paste -sd' ')"
 log "Packing $OUT/$name"
 tar --numeric-owner --xattrs --xattrs-include='*' --acls --sort=name \
     --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' --exclude='./run/*' \
@@ -224,5 +318,6 @@ mv -f "$OUT/$name.part" "$OUT/$name"
 
 du -sh --apparent-size "$ROOTFS" | awk '{print "rootfs: " $1}'
 ls -la "$OUT/$name"
-(( ${KEEP_ROOTFS:-0} )) || rm -rf "$ROOTFS"
+for p in womarchy-compat "${REQUIRED_WOMARCHY[@]}"; do printf '%s ' "$(pacman -r "$ROOTFS" -Q "$p" 2>/dev/null || echo "$p:none")"; done; echo
+(( ${KEEP_ROOTFS:-0} )) || remove_rootfs
 echo "$OUT/$name"

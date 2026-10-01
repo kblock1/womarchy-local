@@ -7,27 +7,41 @@
 # wholesale it walks their run_logged lines through a skip list, then runs the
 # womarchy WSL leaves from /usr/lib/womarchy/wsl/.
 #
-#   womarchy-apply-system --install-user USER [--first-install|--upgrade]
-#   womarchy-apply-system --defer-provisioning --first-install   (image build: no user yet)
-#   womarchy-apply-system --reassert       (WSL leaves only; used by update hooks)
-#   womarchy-apply-system --list           (print the plan, run nothing)
-#
 # Policy (docs/research/01-omarchy.md §7, §10.5):
 #   config/, post-install/  default-allow, minus WOMARCHY_SKIP
 #   hardware/, login/       default-deny (nothing in them applies to WSL)
-# Extra skips/opt-ins: WOMARCHY_SKIP_EXTRA="config/foo.sh ..." and
-# WOMARCHY_FIREWALL=1 (runs config/firewall.sh, i.e. ufw).
+# A new upstream leaf in config/ or post-install/ therefore runs automatically;
+# a CI job that diffs upstream all.sh files on each Omarchy release and flags
+# unclassified leaves is planned (PLAN.md Phase 2, item 7), not yet in place.
+# A line in an all.sh that is not a plain `run_logged "$OMARCHY_INSTALL/..."`
+# call stops the run with an error rather than being guessed at.
+#
+# Settings come from /etc/womarchy/config (WOMARCHY_DOCKER, WOMARCHY_FIREWALL).
+# A value given in the environment overrides the file and is saved to it, so the
+# post-update hook (whose sudo resets the environment) keeps honouring it.
 
 set -euo pipefail
 
-usage() { sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() {
+  cat <<'USAGE'
+Usage: womarchy-apply-system --install-user USER [--first-install|--upgrade]
+       womarchy-apply-system --defer-provisioning --first-install   (image build: no user yet)
+       womarchy-apply-system --reassert       (WSL leaves only; run by the update hooks)
+       womarchy-apply-system --list           (print the plan, run nothing)
+
+Environment / /etc/womarchy/config:
+  WOMARCHY_DOCKER=1|0     enable docker.socket (0: Docker Desktop's WSL integration)
+  WOMARCHY_FIREWALL=0|1   1: run Omarchy's config/firewall.sh (ufw) and stop masking ufw
+  WOMARCHY_SKIP_EXTRA="config/foo.sh ..."   skip more upstream leaves (this run only)
+USAGE
+}
 
 install_user="${OMARCHY_INSTALL_USER:-}"
 first_install=0 upgrade=0 defer_provisioning=0 reassert=0 list_only=0
 
 while (($#)); do
   case "$1" in
-    --install-user) install_user="${2:-}"; shift 2 ;;
+    --install-user) install_user="${2:-}"; shift; (($#)) && shift ;;
     --defer-provisioning) defer_provisioning=1; shift ;;
     --first-install) first_install=1; shift ;;
     --upgrade) upgrade=1; shift ;;
@@ -43,15 +57,37 @@ export OMARCHY_INSTALL="${OMARCHY_INSTALL:-$OMARCHY_PATH/install}"
 export WOMARCHY_LIB="${WOMARCHY_LIB:-/usr/lib/womarchy}"
 export OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 
-# Upstream leaves skipped under WSL. Everything else in config/ and
-# post-install/ runs; a new upstream leaf is picked up automatically (the CI
-# audit flags it for classification).
+# --- settings: environment > /etc/womarchy/config > default ---------------------------
+CONFIG=/etc/womarchy/config
+declare -A DEFAULTS=([WOMARCHY_DOCKER]=1 [WOMARCHY_FIREWALL]=0)
+config_value() {
+  [[ -f $CONFIG ]] || return 0
+  sed -n "s/^$1=\([01]\)[[:space:]]*\$/\1/p" "$CONFIG" | tail -n1
+}
+save_config() {
+  install -d -m 0755 "${CONFIG%/*}"
+  [[ -f $CONFIG ]] || install -m 0644 /dev/null "$CONFIG"
+  if grep -q "^$1=" "$CONFIG"; then sed -i "s/^$1=.*/$1=$2/" "$CONFIG"; else echo "$1=$2" >>"$CONFIG"; fi
+}
+for key in "${!DEFAULTS[@]}"; do
+  value=${!key:-}
+  if [[ -n $value ]]; then
+    [[ $value == [01] ]] || { echo "Error: $key must be 0 or 1 (got '$value')" >&2; exit 1; }
+    if (( EUID == 0 && ! list_only )) && [[ $(config_value "$key") != "$value" ]]; then save_config "$key" "$value"; fi
+  else
+    value=$(config_value "$key")
+    value=${value:-${DEFAULTS[$key]}}
+  fi
+  export "$key=$value"
+done
+
+# Upstream leaves skipped under WSL. Everything else in config/ and post-install/ runs.
 WOMARCHY_SKIP=(
   config/snapper.sh          # no btrfs; snapper is provided (not installed) by womarchy-compat
   config/enable-services.sh  # replaced by wsl/enable-services.sh
-  config/firewall.sh         # Hyper-V firewall + WSL NAT already gate inbound; opt-in below
 )
-[[ ${WOMARCHY_FIREWALL:-0} == 1 ]] && WOMARCHY_SKIP=("${WOMARCHY_SKIP[@]/config\/firewall.sh}")
+# Hyper-V firewall + WSL NAT already gate inbound traffic; ufw is opt-in.
+[[ $WOMARCHY_FIREWALL == 1 ]] || WOMARCHY_SKIP+=(config/firewall.sh)
 read -r -a _extra <<<"${WOMARCHY_SKIP_EXTRA:-}"
 WOMARCHY_SKIP+=("${_extra[@]}")
 
@@ -63,25 +99,40 @@ WSL_LEAVES=(binfmt.sh pacman.sh enable-services.sh gpu.sh audio.sh keyboard-loca
 skipped() {
   local leaf="$1" s
   case $leaf in hardware/*|login/*) return 0 ;; esac
-  for s in "${WOMARCHY_SKIP[@]}"; do [[ -n $s && $leaf == "$s" ]] && return 0; done
+  for s in "${WOMARCHY_SKIP[@]}"; do [[ $leaf == "$s" ]] && return 0; done
   return 1
 }
 
-# Yield the leaf paths (relative to $OMARCHY_INSTALL) that an all.sh would run.
+# Print the leaf paths (relative to $OMARCHY_INSTALL) that an all.sh would run.
+# Fails on any line it does not understand.
 leaves_of() {
-  local line
-  [[ -f $OMARCHY_INSTALL/$1/all.sh ]] || return 0
-  while IFS= read -r line; do
-    [[ $line =~ ^[[:space:]]*run_logged[[:space:]]+\"?\$OMARCHY_INSTALL/([^\"[:space:]]+)\"? ]] && echo "${BASH_REMATCH[1]}"
-  done <"$OMARCHY_INSTALL/$1/all.sh"
+  local file=$OMARCHY_INSTALL/$1/all.sh line
+  [[ -f $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    if [[ $line =~ ^[[:space:]]*run_logged[[:space:]]+\"\$OMARCHY_INSTALL/([A-Za-z0-9_./-]+\.sh)\"[[:space:]]*$ &&
+          ${BASH_REMATCH[1]} != *..* ]]; then
+      echo "${BASH_REMATCH[1]}"
+    else
+      echo "womarchy-apply-system: cannot classify this line of $file:" >&2
+      echo "  $line" >&2
+      return 1
+    fi
+  done <"$file"
 }
 
+# The plan: "run <leaf>" / "skip <leaf>" for every upstream leaf.
+plan=()
+for phase in config hardware login post-install; do
+  leaves=$(leaves_of "$phase") || exit 1
+  while IFS= read -r leaf; do
+    [[ -n $leaf ]] || continue
+    if skipped "$leaf"; then plan+=("skip $leaf"); else plan+=("run $leaf"); fi
+  done <<<"$leaves"
+done
+
 if (( list_only )); then
-  for phase in config hardware login post-install; do
-    while read -r leaf; do
-      if skipped "$leaf"; then echo "skip  $leaf"; else echo "run   $leaf"; fi
-    done < <(leaves_of "$phase")
-  done
+  printf '%s\n' "${plan[@]}" | sed 's/^run /run   /; s/^skip /skip  /'
   for leaf in "${WSL_LEAVES[@]}"; do echo "run   wsl/$leaf"; done
   exit 0
 fi
@@ -109,6 +160,13 @@ export OMARCHY_UPGRADE="$upgrade"
 export OMARCHY_INSTALL_LOG_FILE="${OMARCHY_INSTALL_LOG_FILE:-/var/log/omarchy-install.log}"
 export PATH="$OMARCHY_PATH/bin:$PATH"
 
+# Omarchy's start_install_log makes the log world-writable (0666, for its
+# user-run steps); womarchy's user steps log elsewhere, so close it again.
+tighten_log() {
+  if [[ -f $OMARCHY_INSTALL_LOG_FILE ]]; then chmod 0640 "$OMARCHY_INSTALL_LOG_FILE" 2>/dev/null || true; fi
+}
+trap tighten_log EXIT
+
 source "$OMARCHY_INSTALL/helpers/logging.sh"
 start_install_log
 
@@ -120,14 +178,13 @@ run_leaf() {
 }
 
 if (( ! reassert )); then
-  for phase in config hardware login post-install; do
-    while read -r leaf; do
-      if skipped "$leaf"; then
-        omarchy_log_line "[$(date '+%Y-%m-%d %H:%M:%S')] Skipped (womarchy): $OMARCHY_INSTALL/$leaf"
-      else
-        run_leaf "$OMARCHY_INSTALL/$leaf"
-      fi
-    done < <(leaves_of "$phase")
+  for step in "${plan[@]}"; do
+    leaf=${step#* }
+    if [[ $step == skip* ]]; then
+      omarchy_log_line "[$(date '+%Y-%m-%d %H:%M:%S')] Skipped (womarchy): $OMARCHY_INSTALL/$leaf"
+    else
+      run_leaf "$OMARCHY_INSTALL/$leaf"
+    fi
   done
 fi
 
@@ -136,6 +193,7 @@ for leaf in "${WSL_LEAVES[@]}"; do
 done
 
 stop_install_log
+tighten_log
 
 if ((${#failed[@]})); then
   echo "womarchy-apply-system: failed leaves: ${failed[*]} (see $OMARCHY_INSTALL_LOG_FILE)" >&2

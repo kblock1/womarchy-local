@@ -10,19 +10,23 @@
 timeout=30 wait_route=1
 while (($#)); do
   case "$1" in
-    -t|--timeout) timeout="${2:-30}"; shift 2 ;;
-    --timeout=*) timeout="${1#*=}"; shift ;;
+    -t|--timeout)
+      shift
+      if [[ ${1:-} =~ ^[0-9]+$ ]]; then timeout=$1; shift; fi ;;
+    --timeout=*) timeout=${1#*=}; shift ;;
     -s|--wait-for-startup|-x|--exit) wait_route=0; shift ;;
     -q|--quiet) shift ;;
-    -*) # combined short flags such as -qs or -qx
-      [[ $1 == *[sx]* ]] && wait_route=0
-      [[ $1 == *t ]] && { timeout="${2:-30}"; shift; }
-      shift ;;
+    -[a-z]*) # combined short flags, e.g. -qs, -qx, -qt 30
+      flags=${1#-}
+      shift
+      [[ $flags == *[sx]* ]] && wait_route=0
+      if [[ $flags == *t && ${1:-} =~ ^[0-9]+$ ]]; then timeout=$1; shift; fi ;;
     *) shift ;;
   esac
 done
+[[ $timeout =~ ^[0-9]+$ ]] || timeout=30
 if (( wait_route )); then
-  for ((i = 0; i < ${timeout%%.*}; i++)); do
+  for ((i = 0; i < timeout; i++)); do
     ip route show default 2>/dev/null | grep -q . && break
     ip -6 route show default 2>/dev/null | grep -q . && break
     sleep 1

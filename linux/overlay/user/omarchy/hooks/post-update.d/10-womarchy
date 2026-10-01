@@ -1,6 +1,8 @@
 #!/bin/bash
 # womarchy: reassert the WSL invariants after `omarchy update`. Package updates
 # and migrations can restore /etc/pacman.conf or /etc/docker/daemon.json and
-# re-enable NetworkManager, systemd-resolved or sddm. Runs with omarchy
-# update's warm sudo. Managed by womarchy-provision-user.
-sudo -n womarchy-apply-system --reassert 2>/dev/null || sudo womarchy-apply-system --reassert
+# re-enable NetworkManager, systemd-resolved or sddm. Settings come from
+# /etc/womarchy/config. Runs once, errors visible; omarchy update keeps sudo
+# warm, so normally there is no prompt. Managed by womarchy-provision-user.
+sudo -n true 2>/dev/null || echo "womarchy: sudo is needed to reassert the WSL settings"
+sudo womarchy-apply-system --reassert

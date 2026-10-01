@@ -1,0 +1,16 @@
+#!/bin/sh
+# womarchy: systemd user environment generator (/usr/lib/systemd/user-environment-generators).
+# Selects Mesa's d3d12 driver for the user manager (and so uwsm, Hyprland and every
+# user service) only when WSL exposes the host GPU as /dev/dxg. Mesa does not fall
+# back once GALLIUM_DRIVER is set, so without /dev/dxg it stays unset (llvmpipe).
+# A value already in the manager's environment (environment.d, an import) wins.
+# WOMARCHY_DXG overrides the device path (tests).
+dxg=${WOMARCHY_DXG:-/dev/dxg}
+if [ -z "${GALLIUM_DRIVER+x}" ] && [ -e "$dxg" ]; then
+  echo GALLIUM_DRIVER=d3d12
+fi
+# GTK4: the GL renderer (works on d3d12 and llvmpipe); its Vulkan path would run on
+# the non-conformant Dozen driver.
+if [ -z "${GSK_RENDERER+x}" ]; then
+  echo GSK_RENDERER=ngl
+fi

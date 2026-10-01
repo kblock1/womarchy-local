@@ -1,0 +1,14 @@
+# womarchy settings. Read by womarchy-apply-system, which also runs after every
+# `omarchy update` (post-update hook), so choices made here persist. After an
+# edit, apply them with: sudo womarchy-apply-system --reassert
+# (A variable given on the command line, e.g.
+#  `sudo WOMARCHY_DOCKER=0 womarchy-apply-system --reassert`, is saved here too.)
+
+# 1: enable docker.socket (socket-activated, idle until used).
+# 0: leave Docker to Docker Desktop's WSL integration (docker.socket disabled).
+WOMARCHY_DOCKER=1
+
+# 1: configure and enable ufw (Omarchy's install/config/firewall.sh) on the next
+#    full apply, and stop masking ufw.service.
+# 0: Windows' Hyper-V firewall and WSL NAT gate inbound traffic; ufw stays masked.
+WOMARCHY_FIREWALL=0
