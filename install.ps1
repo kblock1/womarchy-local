@@ -77,6 +77,19 @@ function Invoke-WslElevated($arguments) {
     }
 }
 
+# True when a WSL distro with this name exists (re-running the installer keeps it).
+function Test-Distro($name) {
+    $old = $env:WSL_UTF8; $env:WSL_UTF8 = "1"
+    try {
+        $names = (& wsl.exe --list --quiet 2>$null) | ForEach-Object { ($_ -replace "`0", "").Trim() }
+        return $LASTEXITCODE -eq 0 -and ($names -contains $name)
+    } catch {
+        return $false
+    } finally {
+        $env:WSL_UTF8 = $old
+    }
+}
+
 function Get-File($url, $dest) {
     & curl.exe -L --fail --proto "=https" --progress-bar -o $dest $url
     if ($LASTEXITCODE -ne 0) { Stop-Install "Download failed: $url" }
@@ -100,9 +113,16 @@ if (-not $wsl) {
     $wslAction = "update"
     $steps += "Update WSL from $wsl to the latest version (at least $TestedWsl, which Omarchy is tested on). This applies to ALL your WSL distros: they keep their files, but WSL restarts (anything running in WSL stops) and Windows asks for administrator permission. See $Docs for known issues after the update."
 }
+# Re-running the installer over an existing install keeps the distro and only updates omarchy.exe and
+# its shortcuts (`omarchy install` skips the image when the distro exists).
+$existing = $wsl -and (Test-Distro $Distro)
 if (-not $Exe) { $steps += "Download omarchy.exe from $Release." }
-if (-not $Image) { $steps += "Download the Omarchy image (about 1.7 GB; it needs about 7 GB of disk once installed)." }
-$steps += "Create a new WSL distro named '$Distro' (your other WSL distros are not touched), ask you for a user name and password, and add 'Omarchy' to the Start menu and the 'omarchy' command."
+if ($existing) {
+    $steps += "Keep your existing '$Distro' distro as it is, and update omarchy.exe, the Start menu entry and the 'omarchy' command. (To update the Linux side, run 'omarchy update'.)"
+} else {
+    if (-not $Image) { $steps += "Download the Omarchy image (about 1.7 GB; it needs about 7 GB of disk once installed)." }
+    $steps += "Create a new WSL distro named '$Distro' (your other WSL distros are not touched), ask you for a user name and password, and add 'Omarchy' to the Start menu and the 'omarchy' command."
+}
 
 if ($wsl) { Say "WSL $wsl is installed." }
 Say "This installer will:"
