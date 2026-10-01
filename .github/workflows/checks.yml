@@ -24,7 +24,7 @@ jobs:
       run:
         working-directory: windows/omarchy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: windows/omarchy
@@ -36,7 +36,7 @@ jobs:
     name: scripts and docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Shell scripts parse and pass shellcheck
         run: |

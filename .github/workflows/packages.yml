@@ -48,7 +48,7 @@ jobs:
           # the container image is newer than the snapshot: move everything to the snapshot
           pacman -Syyuu --noconfirm git sudo
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build
         env:
@@ -62,7 +62,7 @@ jobs:
           sudo -u builder env WOMARCHY_REPO="$GITHUB_WORKSPACE/out/repo" \
             bash linux/packages/build-all.sh "${pkgs[@]}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: packages
           path: out/repo/*.pkg.tar.zst
@@ -84,7 +84,7 @@ jobs:
           pacman-key --populate archlinux
           pacman -Syu --noconfirm github-cli gnupg
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: needs.build.result == 'success'
         with:
           name: packages

@@ -37,7 +37,7 @@ jobs:
 
       - name: Skip if this snapshot and repository were already checked
         id: seen
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: checked
           key: ${{ steps.snap.outputs.key }}
