@@ -1,10 +1,13 @@
-# Install notes (source for the future installer)
+# Install notes
 
-These are distilled, repeatable requirements and steps, each with the reason behind it. [WORKLOG.md](WORKLOG.md) has the full history. Items marked **(script)** must end up in the installer.
+These are distilled, repeatable requirements and steps, each with the reason behind it. [WORKLOG.md](WORKLOG.md) has the full history. Items marked **(script)** are done by the installers ([install.ps1](../install.ps1), `omarchy install`) or the image.
 
 ## Host prerequisites
 - Windows 11 x64 with virtualization enabled and the "Virtual Machine Platform" feature on.
-- **WSL ≥ 2.9 (target 3.0.x).** **(script)** Check `wsl --version`. If it's older, run `wsl --update`, which **needs UAC elevation** and restarts the WSL VM, stopping all running distros. So ask the user first, and never do it while their distros are busy.
+- **WSL ≥ 3.0.1** (the tested version). **(script)** `install.ps1` checks `wsl --version`.
+  - If WSL is older, it runs `wsl --update`, which **needs UAC elevation** and restarts the WSL VM, stopping all running distros.
+  - If WSL is missing, it runs `wsl --install --no-distribution`, which may need a Windows restart.
+  - Either way it explains this, including that the update applies to every distro, and asks first. `omarchy.exe` refuses older versions with the same advice.
 - A GPU driver with WSL GPU-PV support (`/dev/dxg` present in WSL).
 - GUI apps must stay enabled globally (`guiApplications` must not be `false` in `.wslconfig`). The shared-memory frame path uses WSLg's virtio-fs share, and audio uses WSLg's PulseServer.
 
@@ -24,8 +27,9 @@ These are distilled, repeatable requirements and steps, each with the reason beh
 - Do **not** load vgem or any kernel module. On WSL ≥ 2.9 the kernel has no DRM, and loading modules affects all distros.
 
 ## Installing on a user's machine (`omarchy.exe`)
-- `omarchy install [IMAGE.wsl|URL]` checks WSL ≥ 2.5, then imports the image with `wsl --install --from-file … --name Omarchy --no-launch`.
-  - The image comes from the argument, else an `Omarchy*.wsl` next to the exe, else the release URL (a placeholder until releases are published).
+- `install.ps1` (run with `irm …/install.ps1 | iex`): Windows 11 and WSL checks (above), then it downloads `omarchy.exe` (checked against `omarchy.exe.sha256`) and runs `omarchy install`.
+- `omarchy install [IMAGE.wsl|URL]` checks WSL ≥ 3.0.1, then imports the image with `wsl --install --from-file … --name Omarchy --no-launch`.
+  - The image comes from the argument, else an `Omarchy*.wsl` next to the exe, else the latest GitHub release (`Omarchy.wsl`, checked against `Omarchy.wsl.sha256`).
   - It then runs first-run setup, copies the exe to `%LOCALAPPDATA%\Programs\Omarchy` (plus the user PATH) and creates Start menu `Omarchy.lnk`.
 - **First-run setup:** WSL runs an image's `[oobe] command` only when its default shell is opened interactively, **never** for `wsl --exec`.
   - So `omarchy.exe` runs `/usr/lib/womarchy/oobe.sh` as root in the console, then `wsl --terminate`s the distro so the `[user] default` it wrote applies.
@@ -47,7 +51,7 @@ These are distilled, repeatable requirements and steps, each with the reason beh
 
 ## Shared memory (frames)
 - WSLg's virtio-fs share, tag `wslg`, can be mounted in the distro (root): `mount -t virtiofs wslg /mnt/wslgshm -o dax`. Details on creating and keeping files are pending (see WORKLOG §11).
-- **(script, done in package `womarchy-session`)** Mount the share at boot: systemd unit `mnt-wslgshm.mount` (`What=wslg`, `Type=virtiofs`, `Options=dax`). The share is flat (no mkdir or readdir). Create files with `open(O_CREAT|O_EXCL)` + `fallocate` + `mmap(MAP_SHARED|MAP_POPULATE)` and keep the fd open. **File sizes must be whole pages** (otherwise `EINVAL`); aquamarine rounds up. Windows opens `WSL\<VMID>\wslg\<leaf-name>` with `OpenFileMappingW`. Measured at 6 GB/s both ways.
+- **(script, done in package `womarchy-session`)** Mount the share at boot: systemd unit `mnt-wslgshm.mount` (`What=wslg`, `Type=virtiofs`, `Options=dax`). The share is flat (no mkdir or readdir). Create files with `open(O_CREAT|O_EXCL)` + `fallocate` + `mmap(MAP_SHARED)` and keep the fd open. Write every page once at creation: the first write to a DAX page is several hundred times slower than later ones, and the cost grows with how much is mapped (`MAP_POPULATE` only read-faults a shared mapping, so it adds cost without helping). Hyprland keeps two such buffers per output. **File sizes must be whole pages** (otherwise `EINVAL`); aquamarine rounds up. Windows opens `WSL\<VMID>\wslg\<leaf-name>` with `OpenFileMappingW`. Measured at 6 GB/s both ways.
 - **(script, WSL 3.0.1)** Add `systemd-binfmt` drop-in `ExecStart=-/usr/lib/systemd/systemd-binfmt`, or the distro boots `degraded`.
 
 ## Omarchy image (overlay + `.wsl` builder)
@@ -69,13 +73,13 @@ Details are in [linux/image/README.md](../linux/image/README.md) and [WORKLOG.md
 
 ### What the image guarantees (checked by `linux/image/verify-image.sh`)
 - **`womarchy-compat`** provides and conflicts with `limine limine-mkinitcpio-hook limine-snapper-sync snapper`, so `omarchy` installs without Limine's failing hook. It also conflicts with kernel packages.
-- **pacman:** `/etc/pacman.conf` is Omarchy's stable template, plus `IgnorePkg` for kernels, DKMS and firmware, plus `[womarchy]` as the **first** repo (`file:///var/cache/womarchy-repo` for now). `omarchy update` and `omarchy refresh pacman` rewrite the file, so the user hooks `~/.config/omarchy/hooks/{post-update.d,pre-refresh-pacman.d}/10-womarchy` reapply these entries by running `sudo womarchy-apply-system --reassert`.
+- **pacman:** `/etc/pacman.conf` is Omarchy's stable template, plus `IgnorePkg` for kernels, DKMS and firmware, plus `[womarchy]` as the **first** repo (the GitHub release `repo`, then the local copy in `/var/lib/womarchy/repo`). `omarchy update` and `omarchy refresh pacman` rewrite the file, so the user hooks `~/.config/omarchy/hooks/{post-update.d,pre-refresh-pacman.d}/10-womarchy` reapply these entries by running `sudo womarchy-apply-system --reassert`.
 - **Services:**
   - Masked: `NetworkManager`, `systemd-resolved`, `systemd-networkd`, `sddm`, `cups`, `avahi-daemon`, `power-profiles-daemon`, `bluetooth`, gettys, `systemd-firstboot`.
-  - Enabled: `docker.socket` (disable with `WOMARCHY_DOCKER=0`) and `systemd-oomd`.
+  - Enabled: `docker.socket` (`WOMARCHY_DOCKER=0` in `/etc/womarchy/config` disables it) and `systemd-oomd`.
   - WSL keeps generating `/etc/resolv.conf`.
   - The `dns` key is removed from `/etc/docker/daemon.json`, because it depends on resolved.
-- **GPU:** `GALLIUM_DRIVER=d3d12` and `GSK_RENDERER=ngl` are set in `/etc/environment.d/10-womarchy-gpu.conf` (user manager) and `/etc/profile.d/womarchy-gpu.sh` (login shells), and again in the user's uwsm env.
+- **GPU:** `GALLIUM_DRIVER=d3d12` (only when `/dev/dxg` exists) and `GSK_RENDERER=ngl`: the user environment generator `60-womarchy-gpu` (user manager) and `/etc/profile.d/womarchy-gpu.sh` (login shells); `womarchy-session` applies the same `/dev/dxg` rule.
 - **Audio** (see WORKLOG D.5 for the cause):
   - PipeWire loads pulse-tunnel sink and source modules to `unix:/mnt/wslg/PulseServer` (`/etc/pipewire/pipewire.conf.d/50-womarchy-wslg.conf`).
   - **(script)** A drop-in for WSL's generated `wslg-session.service` stops it from symlinking WSLg's `pulse/native` over pipewire-pulse's socket.
@@ -89,12 +93,13 @@ Details are in [linux/image/README.md](../linux/image/README.md) and [WORKLOG.md
 - The lite profile drops Omarchy's preinstalls: LibreOffice, Kdenlive, OBS, Obsidian, Pinta/.NET, Xournal++, moonlight, aether, cliamp, lazydocker, omacut/omacalc/omawrite. It also writes `~/.local/state/omarchy/preinstalls-removed`, which hides those apps' key bindings.
 
 ## Acceptance tests (Windows side, `lab/`)
-Run these after building or changing anything. They use windowed mode or throwaway distros, and never take over the real displays.
+Run these after building or changing anything. All but `fullscreen-test.ps1` use windowed mode or throwaway distros and never take over the real displays.
 - `viewer-test.ps1 [-Session …] [-EndBy close|kill]`: launch, frame dump, and exit-code propagation.
 - `clipboard-test.ps1 [-Distro …]`: all three clipboard directions. It saves and restores your clipboard text.
 - `gpu-clients-test.ps1`: GL (es2gears) and Vulkan (vkcube / Dozen) clients inside the session.
 - `display-change-test.ps1`: live monitor add, remove and resize on fake monitors (`OMARCHY_FAKE_MONITORS_FILE`).
 - `installer-test.ps1 -Image Omarchy-….wsl`: `omarchy install` → desktop → `uninstall`, and the first-launch setup path, on `omarchy-test-e2e`.
+- `fullscreen-test.ps1 -Distro …`: the real monitors (~1.5 min): an app on each monitor, DPI and positions, a Windows-side capture, frame rates and viewer CPU.
 - `omarchy.exe --input-script lab/scripts-omarchy-*.txt`: Omarchy tours (menus, terminal, Chromium, HiDPI, lock, logout) with screenshots taken inside the session.
 
 ### Omarchy image: follow-ups
@@ -105,3 +110,24 @@ Run these after building or changing anything. They use windowed mode or throwaw
 - **First-run Wi-Fi toast:** `/usr/lib/womarchy/bin/nm-online` is appended to the session PATH and reports "online", so Omarchy's first run shows only "Update System".
 - **Kernel prompt:** "Linux kernel has been updated. Reboot?" after `omarchy update` has no clean overlay-side fix. The check needs a pacman-owned `vmlinuz` inside WSL's shared modules overlay (see above). Answer no; an upstream guard is the fix.
 - The image ships pacman sync DBs from the build, which match its frozen snapshot, so a fresh install gives no "database file does not exist" warnings.
+
+### Omarchy image: after the code review
+What changed after the code review, in detail (the notes above are updated to match).
+- **[womarchy] repository**
+  - The local copy is at `/var/lib/womarchy/repo`, not `/var/cache`, because cache cleaners would delete it.
+  - It is root-owned and never group/other-writable: it is trusted (`TrustAll`) and comes first, so a writable copy would let any user plant packages that root installs.
+  - `pacman.conf` lists `Server = https://github.com/sytelus/womarchy/releases/download/repo` first, then `file:///var/lib/womarchy/repo` as the offline fallback.
+  - `wsl/pacman.sh` repairs ownership and permissions, migrates the old `/var/cache/womarchy-repo`, and **fails loudly** rather than leave `[womarchy]` out.
+  - **(script)** The installer must never copy the repo with modes from a Windows drive.
+- **Settings:** `/etc/womarchy/config` holds `WOMARCHY_DOCKER` (default 1) and `WOMARCHY_FIREWALL` (default 0). Change a setting with `sudo WOMARCHY_DOCKER=0 womarchy-apply-system --reassert`: the value is saved to the file and kept across `omarchy update`.
+- **Masks:** a service the user unmasks after womarchy masked it is left alone from then on (`/var/lib/womarchy/{masked,released}-units`).
+- **GPU:** `GALLIUM_DRIVER=d3d12` is set only when `/dev/dxg` exists. Mesa does not fall back to llvmpipe once the variable is set. It is set by the user environment generator `60-womarchy-gpu` and by `/etc/profile.d/womarchy-gpu.sh`, not by `environment.d`.
+- **Keyboard:** the OOBE takes **all** Windows keyboard layouts, in order (for example `us,ru`).
+  - With more than one layout it adds `grp:alt_shift_toggle` (Alt+Shift switches layouts) as `XKBOPTIONS` in `/etc/vconsole.conf`, and `~/.config/hypr/womarchy.lua` appends that to Omarchy's `kb_options`.
+  - Names are validated against `xkeyboard-config`'s `base.lst`. An invalid layout never blocks locale generation.
+- **Unattended OOBE:** use `WOMARCHY_OOBE_USER` **and** `WOMARCHY_OOBE_PASSWORD`. Without a terminal, one without the other is an error. `WOMARCHY_OOBE_DEFAULTS=1` (user `omarchy`, password `omarchy`, sudo) is **for test distros only**.
+- Install log permissions: `/var/log/omarchy-install.log` is 0640 after every `womarchy-apply-system` run; `/var/log/womarchy-oobe.log` is 0600.
+- **Building:** the build fails unless `out/repo` holds `womarchy-session`, `aquamarine`, `hyprland` and `mesa`, and those exact builds get installed (`ALLOW_STOCK_PACKAGES=1` overrides). The rootfs is never deleted while anything is mounted under it.
+- **Testing:** `test-image.ps1 -Image … -Name omarchy-test-N [-Location …]` defaults its location to `%LOCALAPPDATA%\womarchy-test\<name>`. It unregisters the distro even when a step fails, unless `-Keep` is given.
+- **(release step)** Before publishing an image, run `lab/overlay/privacy-scan.sh` on a `KEEP_ROOTFS=1` build. It greps every file, binaries included, for owner and machine strings, and checks machine-id, hostname, logs, keys and history. The builder itself refuses to pack when machine-id, hostname, pacman's keyring, `/root` or `/home` content, journal files or SSH host keys are present. The image ships without `/etc/machine-id`; systemd creates a unique one at first boot.
+- Package **file** names in the `[womarchy]` repo carry no `:` (epochs renamed, as GitHub release assets require). Tools must find packages by name in the db (`%FILENAME%`) or with `pacman -Q`, never by globbing file names.

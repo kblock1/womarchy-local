@@ -18,7 +18,7 @@ A chronological record of what was done, the issues found, and the fixes applied
 ### 2. Lab distro
 - **Did:** `wsl --install archlinux --name womarchy-lab --location D:\WSL\womarchy-lab --no-launch`; ran the `pacman-key` init manually (OOBE is skipped with `--no-launch`); `pacman -Syu`; created user `lab` (wheel, passwordless sudo); wrote `/etc/wsl.conf` with `[user] default=lab`.
 - **Found:** `wsl.exe <distro> -- bash -c '...'` runs through a login shell, which expands `$vars` early. From Git Bash, `/mnt/...` paths are mangled unless `MSYS_NO_PATHCONV=1` is set.
-- **Fix:** put experiments in script files under `lab/`, run them with `wsl -d womarchy-lab -- bash /mnt/d/.../lab/x.sh`, and set `MSYS_NO_PATHCONV=1` in Git Bash.
+- **Fix:** put experiments in script files under `lab/`, run them with `wsl -d womarchy-lab -- bash <repo>/lab/x.sh`, and set `MSYS_NO_PATHCONV=1` in Git Bash.
 
 ### 3. Mesa on Arch-in-WSL
 - **Found:** Mesa 26.2.3 falls back to **llvmpipe** by default; d3d12 is not auto-selected on Arch.
@@ -403,3 +403,176 @@ All in `omarchy-test` via `--input-script` (scripts in `lab/scripts-omarchy-*.tx
   - Checked after the VM restart: all `modules.*` files are WSL's originals (dated 2026-07-31).
   - The approach was withdrawn. The image now disables kmod's depmod hook (there's no pacman-managed kernel on WSL). The prompt stays documented as "answer no" until Omarchy adds a WSL guard upstream.
   - **Rule for future work:** `/usr/lib/modules`, `/mnt/wslg`, `/tmp/.X11-unix` (WSLg's bind) and `/usr/lib/wsl` are VM-shared or WSL-owned; never write there from a distro.
+
+### Omarchy overlay & image builder (agent): code-review fixes
+All items were checked; none was found to be wrong. Each fix was tested with throwaway-rootfs unit tests (`lab/overlay/test-leaves-in-chroot.sh`, 37 checks; `lab/overlay/test-oobe-in-chroot.sh`), then with a fresh `test-image.ps1` run (results below).
+- **S1 (local repo writable):**
+  - The repo copy is now made with `cp -r --no-preserve=mode,ownership`, then `chown root` and `chmod u=rwX,go=rX`, and `*.old` files are dropped. This is applied to both the stage copy and the image copy.
+  - The repo moved to `/var/lib/womarchy/repo`. `[womarchy]` lists the hosted server `https://github.com/sytelus/womarchy/releases/download/repo` first and the local copy second.
+  - `wsl/pacman.sh`, run on every reassert:
+    - moves an old `/var/cache/womarchy-repo` to the new location and removes the old directory;
+    - repairs ownership and permissions;
+    - fails (non-zero, with a message) when there is no `[core]` to place the section before, when `[womarchy]` would not come first, or when the local DB is missing.
+  - The build and `verify-image.sh` both reject group/other-writable or non-root files under the repo.
+  - While the hosted repo does not exist, `pacman -Sy` logs a 404 for it, then syncs from the local copy and exits 0.
+  - **Remaining risk:** the hosted repo is `TrustAll` over HTTPS until packages are signed.
+- **S3:** the keyring bootstrap now requires the set of primary-key fingerprints in `omarchy.gpg` and the set in `omarchy-trusted` to both equal exactly the pinned key. The pinned key lives in `linux/image/omarchy-key.env`, shared with `verify-image.sh`.
+- **S6:** `--defaults` / `WOMARCHY_OOBE_DEFAULTS` is documented as test-only (in `oobe.sh`, INSTALL-NOTES and the README) and prints a warning. The exit status of `chpasswd` (and of `passwd`, capped at 3 tries) is checked; on failure the half-created user is removed and the OOBE exits 1, so it runs again cleanly.
+- **S7:** `womarchy-apply-system` sets `/var/log/omarchy-install.log` to 0640 at the end of every run (from an EXIT trap). The OOBE log is 0600.
+- **B3:**
+  - `GALLIUM_DRIVER=d3d12` is now set only when `/dev/dxg` exists, by `/usr/lib/systemd/user-environment-generators/60-womarchy-gpu` (which also sets `GSK_RENDERER=ngl`) and by a conditional `/etc/profile.d/womarchy-gpu.sh`.
+  - The static `/etc/environment.d/10-womarchy-gpu.conf` is removed on reassert, and the uwsm env file no longer sets these variables.
+  - `WOMARCHY_DXG` overrides the device path for tests.
+  - Note for the lead: `womarchy-session` still exports `GALLIUM_DRIVER=${GALLIUM_DRIVER:-d3d12}` unconditionally.
+- **B4:**
+  - The OOBE reads every `HKCU\Keyboard Layout\Preload` value in order (with substitutes). It maps each one, drops unknown and duplicate layouts, and asks with a default such as `us,ru`.
+  - `keyboard-locale.sh` takes comma lists and checks every layout, variant and option against `/usr/share/X11/xkb/rules/base.lst`. With more than one layout it adds `XKBOPTIONS=grp:alt_shift_toggle`.
+  - Omarchy ignores `XKBOPTIONS`, so `~/.config/hypr/womarchy.lua` appends it to the `kb_options` in effect (`hl.get_config("input.kb_options")`, falling back to Omarchy's default). This part is not yet tested inside Hyprland.
+  - The keyboard and locale steps are now independent: a bad layout leaves `vconsole.conf` untouched, and `locale-gen` still runs.
+- **B6:** without a terminal, `WOMARCHY_OOBE_USER` without `WOMARCHY_OOBE_PASSWORD` exits 1 immediately, before creating an account. Retries for user name, password and layout are capped at 3.
+- **B8:**
+  - Settings live in `/etc/womarchy/config` (`WOMARCHY_DOCKER`, `WOMARCHY_FIREWALL`; only 0 or 1 accepted). A value given in the environment overrides the file and is written back to it.
+  - `WOMARCHY_DOCKER=0` disables `docker.socket`. `WOMARCHY_FIREWALL=1` lifts womarchy's ufw mask; `config/firewall.sh` runs on the next full apply.
+  - Masks are recorded in `/var/lib/womarchy/masked-units`. A recorded unit that is later found unmasked is moved to `released-units` and never masked again.
+- **B10:** the hooks run `sudo -n true` to decide whether to print a "sudo needed" note, then run the command once, with errors visible.
+- **B14:**
+  - The repo listing is read once into a variable; there are no `| grep -q` pipelines left.
+  - The build fails unless `womarchy-session`, `aquamarine`, `hyprland` and `mesa` are in `out/repo` (`ALLOW_STOCK_PACKAGES=1` overrides). After pacstrap it checks that exactly those builds were installed.
+- **B15:** the rootfs is removed only after checking that nothing is mounted at or below it (a `findmnt` prefix check). It then runs `rm -rf --one-file-system`; packing has the same mount guard.
+- **B17:**
+  - `nm-online`: the parser always consumes its arguments. Before, `-t` as the last argument looped forever on `shift 2`.
+  - `keyboard-locale.sh` accepts quoted `LANG` values and `@modifier` locales (`sr_RS.UTF-8@latin` maps to the `locale.gen` entry `sr_RS@latin UTF-8`).
+  - The OOBE refuses a user name that is already a group name (`docker`, `video`, `git`), with a clear message.
+  - `test-image.ps1`:
+    - environment variables are saved and restored;
+    - `try`/`finally` unregisters the distro on failure;
+    - `-Location` defaults to `%LOCALAPPDATA%\womarchy-test\<name>`;
+    - it uses `return` instead of `exit` when dot-sourced.
+- **R1–R6:**
+  - Fixed the `shm-mount.sh` comment (`multi-user.target.wants`).
+  - The PKGBUILD URL is now `https://github.com/sytelus/womarchy`, the non-existent `build-compat.sh` mention is gone, and the version is 0.3.0. It also installs the GPU generator.
+  - The OOBE's closing message points to `omarchy` on Windows.
+  - The CI audit is described as planned. `leaves_of` stops with an error on any `all.sh` line that is not a quoted `run_logged "$OMARCHY_INSTALL/…sh"`.
+  - Usage text comes from heredoc functions, in both scripts.
+  - The fingerprint is defined in one shared file.
+  - The image build deletes `*.old`, `*.pacnew` and `*.pacsave` files that no package owns.
+- **Verification:**
+  - **Test build:** `out/Omarchy-4.0.4-womarchy-20261001-lite.wsl`, built from the out/repo at the time (aquamarine 0.15.1-1.8, hyprland 0.56.2-4.5, womarchy-session 0.1.0-14) with womarchy-compat 0.3.0.
+  - **Fresh install** with `test-image.ps1` as `omarchy-test-2`:
+    - **0 failures** for system and user;
+    - the live `womarchy-apply-system --reassert` passes, leaves the system `running`, and the log at 0640;
+    - 0 Start-menu entries, and the live publish/hide check passed.
+    - The distro and its Start-menu folder were then removed.
+  - The final image is to be rebuilt once the lead's new packages are in `out/repo`.
+  - Pitfall: the image name uses the **UTC** date, so a build after 17:00 PDT is named for the next day. Test with the file the build printed.
+
+### Omarchy overlay & image builder (agent): final lite image and privacy check
+- **Epoch file names:** `out/repo` package files no longer contain `:` (for example `mesa-1.26.2.3-2.1-x86_64.pkg.tar.zst`; the db's `%FILENAME%` matches).
+  - `build-image.sh` already checked packages by name and version, from the db entry names and `pacman -Q`.
+  - Debug packages are now removed by the db's `%FILENAME%` rather than a file glob.
+  - The build now fails if the db lists a file that is not in the repo.
+  - `verify-image.sh` and `wsl/pacman.sh` never relied on file names.
+- **Final image:** `out/Omarchy-4.0.4-womarchy-20261001-lite.wsl`, 1,694,528,036 bytes (1.58 GiB), SHA-256 `1da0fd253343cbad43240702d54ef6aa3fbf0c0e5a1630ccbd160a94b6d1ebc6`.
+  - Contents: aquamarine 0.15.1-1.9, hyprland 0.56.2-4.6, mesa 1:26.2.3-2.1, womarchy-session 0.1.0-14, womarchy-compat 0.3.0-1.
+  - `test-image.ps1` on `omarchy-test-2`: OOBE 85 s, **0 failures** for system and user, including the live reassert. 0 Start-menu entries and the live publish/hide check passed. The distro and its Start-menu folder were then removed.
+- **Privacy scan** of the packed rootfs (`lab/overlay/privacy-scan.sh`):
+  - **Owner and machine strings:** a binary-inclusive grep for the owner's user name, host name and email, the local checkout path and `/mnt/<drive>/` paths found nothing (`lab/overlay/privacy-scan.sh`). The one hit, in `/usr/bin/tree-sitter` (an Arch package), is unrelated strings running together, not a path.
+  - **`sytelus`** appears only as the intended project URL (`pacman.conf`, `wsl/pacman.sh`, and the `%URL%` of womarchy-compat and womarchy-session). Their packager is "Unknown Packager".
+  - **Machine-specific files:** `/etc/machine-id` and `/var/lib/dbus/machine-id` are absent; the installed test distro generated its own (`fc7583…`, the build distro's is `20562e…`). There is no `/etc/hostname`, no journal files, an empty `/root`, an empty `/home`, no users with UID ≥ 1000, and no `/etc/pacman.d/gnupg`. No SSH host or user keys, GnuPG private keys, or shell/editor history files exist anywhere.
+  - **Logs and indexes:** `pacman.log` has no `/mnt` or `/home` paths. The plocate db has no paths from outside the image.
+  - Nothing leaked. As a regression guard, the builder now fails if machine-id, hostname, pacman's keyring, `/root` or `/home` content, journal files or SSH host keys are present (tested on a fake tree). That guard only adds checks; it was added after the final image was packed.
+
+### 26. Public repo, protocol v2, code review, three 4K monitors full screen (2026-10-01)
+
+**Published.** The repo is public at https://github.com/sytelus/womarchy (MIT). Before publishing, it was scrubbed of personal data:
+- commits use a GitHub noreply address;
+- no host or user names, and no local paths, in the files or images.
+
+**Owner's other distros.** Two WSL 3.0.1 regressions left Ubuntu distros `degraded`, and both are fixed:
+- a `systemd-binfmt` drop-in that tolerates the read-only binfmt flush;
+- `getty@tty1` masked.
+
+Both fixes are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#other-wsl-distros-after-the-wsl-update) for other users.
+
+**Code review, then rewrites** of what the previous iterations built:
+- **Protocol v2 ([protocol/wdp.h](../protocol/wdp.h)):**
+  - Mutual authentication: the viewer proves the first half of a per-session token, and the compositor answers with the second half. Before that proof the viewer sends no input or clipboard.
+  - The clipboard uses its own token.
+  - New messages `OUTPUT_VISIBLE` and `REFRESH`.
+  - Limits on every size, and strict validation on both sides.
+- **aquamarine backend:**
+  - pending connections get a hello deadline;
+  - fd callbacks dispatch on the fd's current role (Hyprland keeps the first callback per fd number);
+  - frames are paced at the monitor's refresh rate, and hidden outputs at 1 FPS;
+  - per-frame late-ack and lost-ack timers replace a 1 ms ack poll;
+  - frames without damage carry no rectangles.
+- **Viewer:**
+  - one presenter thread per output, each with its own D3D11 device and `SetMaximumFrameLatency(1)`, recovering from device loss;
+  - the keyboard hook on its own thread;
+  - focus and mouse-capture fixes across our own windows;
+  - one viewer per distro;
+  - display changes handled by a serialised worker.
+- **Hyprland:**
+  - rotated outputs read back the right damage;
+  - BGRA readback is checked;
+  - hardware-cursor size at fractional scales;
+  - toplevel export without dmabuf;
+  - **absolute pointer motion per output**: with three monitors, clicks landed on the wrong monitor (new patch 0005).
+- **Session:**
+  - one session at a time (flock);
+  - software-rendering warning when there's no `/dev/dxg`;
+  - only failures from this session are reset;
+  - secrets are unset only if they are still ours.
+- **Overlay and image** (agent, entry above): root-owned repo in `/var/lib/womarchy/repo`, hosted repo first, keyboard layouts, opt-outs persisted, and more.
+
+**Bugs found by testing this round:**
+- **`womarchy-clipd` stalled 5 s on every Windows → Linux paste.** `wl-copy` forks a server that kept the captured stdout/stderr pipes open, so `subprocess.run` waited for its timeout. Fix: wl-copy's output now goes to `/dev/null`.
+- **Full screen failed on three 4K monitors from a stopped distro.** The cause was a chain:
+  1. The viewer gave the handshake 10 s, but Hyprland reached its event loop only after ~17 s.
+  2. The viewer also reported the timeout as "connection closed", which sent the investigation the wrong way at first.
+  3. The distro then shut down by itself 15 s after the viewer exited (WSL's idle timeout), which in the journal looked like a `poweroff` from nowhere.
+
+  Fixes:
+  - the handshake gets the rest of the 60 s startup budget;
+  - receive errors say what they are;
+  - the viewer logs how long connecting took.
+- **Why 3x4K started so slowly.** Sampling Hyprland's stacks (gdb) showed ~14 s in `mmap(MAP_POPULATE)` and `memset` of shm buffers on the DAX share. `lab/bench-dax-alloc.c`:
+
+  | Nine 33 MB buffers kept mapped | Total |
+  |---|---|
+  | `MAP_POPULATE` + `memset` (before) | 9.9 s |
+  | `memset` only | 4.9 s |
+  | lazy (faults in the first frames) | 4.6 s |
+  | 2 MiB-aligned mappings | no real difference |
+
+  - `MAP_POPULATE` only read-faults a shared mapping, so the write faults came on top.
+  - The cost per buffer grows with what is already mapped: 0.24 s for the first, ~1 s once ~300 MB are mapped. Three buffers cost 0.8 s, six 2.8 s, nine 5.7 s.
+
+  Fixes:
+  - no `MAP_POPULATE` (aquamarine 0001);
+  - shm swapchains have **two buffers instead of three** (Hyprland 0001). Only one frame is ever in flight. This also saves 100 MB of shared memory and shrinks the buffer-age damage that each frame reads back.
+
+  Result: 3x4K connects after **3.7–5.3 s** (was 12–17 s), including from a stopped distro in full screen. A single 720p output connects after 1.4 s.
+- `--dump-after` counts frames, not seconds. Its help text now says so, and the dump is written at session end if fewer frames arrived.
+- **vkcube opened on the wrong monitor in one full-screen run.** This was a test-harness bug, not a product one: the script's `move` positioned only Hyprland's pointer, and the next mouse move Windows synthesises put it back where the real Windows cursor was. `move` now places the Windows cursor too, as a real mouse would.
+
+**Full-screen test on the owner's three 4K monitors** (`lab/fullscreen-test.ps1`):
+- **Layout and DPI:**
+  - Windows scales of 150% (sides) and 175% (centre) became Hyprland scales of 1.5 and 1.667: 175% doesn't divide 3840 cleanly, so it is snapped to the nearest clean scale.
+  - Positions 0, 2560 and 4864 (logical): no overlap, in Windows' order.
+  - All outputs at 3840x2160@60.
+- **Apps:** a terminal, a GL app (es2gears) and a Vulkan app (vkcube on Dozen), each opened on its own monitor the way a user would. The Windows-side screen capture shows each on the right monitor.
+- **Throughput:** 100–118 frames/s across the three outputs while two of them animate, ~400 Mpx/s uploaded.
+- **Viewer CPU:** 11 s over the 76–80 s run (it was 95 s before the startup fix).
+- **Idle:** the viewer uses 0.2% of one core and Hyprland 0.3% (three 4K outputs, 30 s).
+
+**Release preparation:**
+- **File names:** package files no longer contain `:` (Mesa's epoch), because GitHub release assets can't. `build-all.sh` renames them, and the repo database records the new names.
+- **Build script:** `build-all.sh` now fails loudly on a makepkg error and uses its own makepkg config instead of overwriting the user's.
+- **[install.ps1](../install.ps1):** the one-step installer. It checks Windows 11, installs or updates WSL to at least 3.0.1 (with a clear warning that this affects all distros), then downloads and verifies `omarchy.exe` and runs `omarchy install`. Tested with PowerShell 5.1 through `irm | iex`.
+- **Minimum WSL:** `omarchy.exe` now requires WSL 3.0.1, the tested version (was 2.5).
+
+**Docs:**
+- README rewritten: a short install-and-use guide with the WSL-update warning.
+- New: [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT.md](DEVELOPMENT.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [UPSTREAMING.md](UPSTREAMING.md), [patches/README.md](../patches/README.md).
+- [lab/README.md](../lab/README.md) now covers every script.

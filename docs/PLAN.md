@@ -15,24 +15,24 @@ Companion to [FEASIBILITY.md](FEASIBILITY.md) (read that first for the evidence)
 - No replacement of Microsoft binaries.
 - Must coexist with the user's other WSL distros without affecting them or system performance while idle.
 
-**Status (2026-09-30; details in [WORKLOG.md](WORKLOG.md)):**
+**Status (2026-10-01; details in [WORKLOG.md](WORKLOG.md)):**
 
 | Milestone | State |
 |---|---|
 | M0 spikes | Done. DRM-free Hyprland on d3d12 (surfaceless EGL). Transport: WSLg's DAX share (zero-copy sections) plus hvsocket control. |
 | M1 packages | Done. `[womarchy]` repo with aquamarine, hyprland, Mesa (two d3d12 patches: deadlock fix, WSL 3.0.1 write-combine upload fix), and `womarchy-session`. |
-| M2 Omarchy image | Built: Omarchy 4.0.4 Lite `.wsl` with OOBE, WSL leaves and user overlay. The full-desktop test in the viewer is in progress. The design moved past "WSLg window" straight to the viewer. |
-| M3 viewer | Mostly done: `omarchy.exe` full-screen/windowed, per-output swapchains, 60 FPS, keyboard hook (Super), mouse, cursor, clipboard (text), multi-output, exit codes, crash cleanup, startup splash. |
-| M4 polish | Partial. Audio via the PipeWire → WSLg tunnel (image). HiDPI scale mapping from Windows DPI. Open: video/dmabuf-free paths, live monitor changes (`WM_DISPLAYCHANGE`), cold-start time. |
-| M5 installer | Partial. `omarchy install / uninstall / status`, Start menu shortcut, PATH, first-run setup. Open: release hosting (needs the owner's decision), `omarchy update`. |
+| M2 Omarchy image | Done. Omarchy 4.0.4 Lite `.wsl` (1.7 GB): first-run setup, WSL leaves, user overlay. Tested by a fresh install each build. |
+| M3 viewer | Done. `omarchy.exe` full-screen/windowed; protocol v2 with mutual authentication; one presenter thread and swapchain per output; keyboard hook (Super), mouse, cursor, clipboard (text); exit codes; device-loss recovery. |
+| M4 polish | Mostly done. Verified: three 4K monitors with mixed DPI (150%/175%) at ~100 frames/s combined; live display changes; audio via WSLg. Cold start on 3x4K takes ~5 s (was ~17 s). Open: hardware video decode paths. |
+| M5 installer | Mostly done. `install.ps1` (installs or updates WSL with a clear warning, then downloads and installs); `omarchy install / uninstall / status`; GitHub releases (lite image only: the full image exceeds GitHub's 2 GB asset limit). Open: CI rebuilds against Omarchy's snapshots, package signing, `omarchy update`. |
+| M6 upstreaming | Planned: see [UPSTREAMING.md](UPSTREAMING.md). |
 
-**Update strategy (needs a hosting decision):**
+**Update strategy:**
 - `[womarchy]` is listed first in `pacman.conf`. pacman takes a package from the first repo that has it, so `omarchy update` keeps our `hyprland`, `aquamarine` and `mesa` even when `[extra]` has newer ones.
+- Hosting: the repo is served from the GitHub release tagged `repo`, with the image's local copy as an offline fallback. It is unsigned for now (`SigLevel = Optional TrustAll`, over HTTPS only); signing is open.
 - Their *dependencies* (hyprutils, hyprlang, hyprgraphics, hyprwayland-scanner, libdisplay-info, llvm-libs, …) still move with Omarchy's Arch snapshot (`stable-mirror.omarchy.org`). A soname bump there breaks our older builds.
-- So the repo must be rebuilt whenever Omarchy advances its snapshot: a CI job in an Arch container that runs `regen-pkgbuilds.sh` against the snapshot's PKGBUILDs, then `build-all.sh`, signs and publishes.
-- Until that exists there is a gap. The image's mirrorlist follows Omarchy's moving `stable-mirror`, so an `omarchy update` after Omarchy advances its snapshot can pull Hyprland-library bumps our packages weren't built against.
+- So the repo must be rebuilt whenever Omarchy advances its snapshot: a CI job in an Arch container that runs `regen-pkgbuilds.sh` against the snapshot's PKGBUILDs, then `build-all.sh`, signs and publishes. Until that exists, an `omarchy update` after Omarchy advances its snapshot can pull Hyprland-library bumps our packages weren't built against.
   - Interim options: `IgnorePkg` the hypr* libraries (updates then stop with a dependency error instead of breaking the desktop), or rebuild locally with `build-all.sh`.
-- **Owner's decision:** where to host the `.wsl` releases and the `[womarchy]` repo (e.g. GitHub Releases plus a GitHub Pages or R2 pacman repo), and the signing key.
 
 ---
 

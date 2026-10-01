@@ -1,0 +1,33 @@
+# Every monitor: desktop; a terminal showing the monitor layout on the first; a GL app (es2gears) on the
+# second and a Vulkan app (vkcube) on the third, opened the way a user would (pointer there, Super+Return);
+# the Omarchy menu. Run with --shot-dir <repo>\lab\out\<dir>; needs mesa-utils and vulkan-tools.
+sleep 10000
+shot 01-desktop.png
+key super+Return
+sleep 3000
+type hyprctl monitors | grep -E "^Monitor|scale|@"
+key Return
+sleep 800
+move 50% 50% 2
+sleep 400
+key super+Return
+sleep 3000
+type es2gears_wayland
+key Return
+sleep 2500
+move 50% 50% 3
+sleep 400
+key super+Return
+sleep 3000
+type vkcube --wsi wayland
+key Return
+sleep 6000
+shot 02-apps.png
+sleep 8000
+move 50% 50% 1
+key super+space
+sleep 2000
+shot 03-menu.png
+key Escape
+sleep 500
+quit

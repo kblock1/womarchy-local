@@ -2,7 +2,7 @@
 
 **Goal.** Run [Omarchy](https://omarchy.org) (Arch Linux + Hyprland) inside WSL2 on Windows 11 with GPU-accelerated graphics. The user types `omarchy` at a Windows prompt and lands in the full-screen Omarchy desktop. When they log out, they are back at the Windows prompt.
 
-**Date:** 2026-09-30. **Status:** feasibility complete; see [PLAN.md](PLAN.md) for the plan.
+**Date:** 2026-09-30. **Status:** feasibility complete; see [PLAN.md](PLAN.md) for the plan. The design was then built: [ARCHITECTURE.md](ARCHITECTURE.md) describes the result, and [WORKLOG.md](WORKLOG.md) records where measurements changed it.
 
 **Evidence base:**
 - four deep-dive research reports ([docs/research/](research/));

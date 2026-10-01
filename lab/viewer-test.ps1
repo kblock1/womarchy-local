@@ -2,8 +2,9 @@
 # session and check omarchy.exe exits with the session's exit code.
 #   -EndBy close: close the viewer window (what a user does; the viewer sends QUIT)
 #   -EndBy kill:  SIGTERM Hyprland from the Linux side
+#   -DumpAfter:   dump the Nth frame of the first output (or the last one, if the session ends sooner)
 #   -Session:     the in-distro entry point (the packaged one, or lab/run-session.sh for /opt dev builds)
-param([int]$Seconds = 20, [string]$Size = "1280x720", [string]$Extra = "", [int]$DumpAfter = 8,
+param([int]$Seconds = 20, [string]$Size = "1280x720", [string]$Extra = "", [int]$DumpAfter = 100000,
       [string]$Session = "/usr/bin/womarchy-session", [string]$EndBy = "close", [string]$Distro = "womarchy-lab")
 $root = Split-Path -Parent $PSScriptRoot   # repo root
 $exe  = "$root\windows\omarchy\target\release\omarchy.exe"
