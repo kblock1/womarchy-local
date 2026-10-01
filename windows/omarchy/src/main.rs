@@ -72,7 +72,7 @@ fn usage() -> ! {
     println!("usage: omarchy [--distro NAME] [--user USER]       start the Omarchy desktop (log out to come back here)");
     println!("       omarchy install [IMAGE.wsl|URL] [--distro NAME] [--location DIR] [--launcher-only | --no-launcher]");
     println!("       omarchy uninstall [--distro NAME] [--yes]");
-    println!("       omarchy status [--distro NAME]");
+    println!("       omarchy status [--distro NAME]                   what's installed and how it's doing (for bug reports)");
     println!("       omarchy update [--backup | --no-backup | --ask]   update Omarchy (asks once whether to back up first)");
     println!("       omarchy rollback [--list] [--to POINT] [--yes]   undo the package changes of the last update");
     println!("       omarchy backup [--to DIR]                        save the whole distro to one file (newest kept)");
@@ -80,6 +80,7 @@ fn usage() -> ! {
     println!("development: --windowed WxH [--monitors N] [--scale S], --session PATH, --port N, --stats,");
     println!("             --dump-frame FILE [--dump-after FRAMES], --input-script FILE [--shot-dir DIR]");
     println!("Ctrl+Alt+End minimises the desktop. OMARCHY_DISTRO sets the default distro name (Omarchy).");
+    println!("omarchy --version prints this program's version.");
     std::process::exit(0)
 }
 
@@ -129,6 +130,10 @@ fn parse_args() -> Args {
             "--dump-frame" => a.dump_frame = Some(value("--dump-frame")),
             "--dump-after" => a.dump_after = value("--dump-after").parse().unwrap_or_else(|_| bad_arg("--dump-after takes a number of frames")),
             "-h" | "--help" => usage(),
+            "-V" | "--version" => {
+                println!("omarchy {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0)
+            }
             other => bad_arg(&format!("unknown argument: {}", other)),
         }
     }

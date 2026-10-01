@@ -482,6 +482,7 @@ pub fn uninstall(name: &str, yes: bool) -> i32 {
 }
 
 pub fn status(name: &str) -> i32 {
+    println!("omarchy.exe:  {}", env!("CARGO_PKG_VERSION"));
     match wsl_version() {
         Some(v) => println!("WSL:          {}.{}.{}{}", v[0], v[1], v[2], if v < MIN_WSL { "  (too old: wsl --update)" } else { "" }),
         None => println!("WSL:          not installed"),

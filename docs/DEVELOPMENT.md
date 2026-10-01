@@ -116,7 +116,7 @@ The signing key exists only as the `womarchy-repo` environment's secret. That en
 3. For a new image (when the overlay or the first-run experience changed):
    - fetch the signed repository: `linux/packages/fetch-signed-db.sh --fetch-packages --prune`;
    - build the lite image ([linux/image/README.md](../linux/image/README.md)) and test it with `linux/image/test-image.ps1`.
-4. Build `omarchy.exe`, then create a GitHub release with:
+4. Set the new version in [windows/omarchy/Cargo.toml](../windows/omarchy/Cargo.toml) (`omarchy --version` and `omarchy status` print it), build `omarchy.exe`, then create a GitHub release with:
    - `Omarchy.wsl` (the lite image), `omarchy.exe`, and a `.sha256` file for each (`sha256sum` format; the installers check them);
    - a copy of [install.ps1](../install.ps1).
 

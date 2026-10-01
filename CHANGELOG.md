@@ -7,6 +7,7 @@
 - **Clipboard images.** Images are now shared between Windows and Omarchy in both directions (PNG; Windows bitmaps are converted).
 - **Signed package repository.** Updates of womarchy's packages (Hyprland, aquamarine, Mesa, the WSL overlay) come from a signed repository, and installs refuse unsigned databases. Installs from 0.1.0 move over automatically with their next update.
 - **WSL overlay updates.** Fixes to the WSL adjustments (`womarchy-compat`) now reach installed systems through normal updates instead of needing a new image.
+- **`omarchy --version`**, and `omarchy status` now shows the version (useful in bug reports).
 - **Safer updates.** An update that would break the GPU driver (an LLVM bump Mesa wasn't built for) now stops with a clear message instead of leaving a broken desktop. A daily check notices when Omarchy's package snapshot moves ahead of womarchy's builds.
 
 **Project**
