@@ -12,6 +12,8 @@ pub const MAX_DIMENSION: u32 = 16384;
 pub const MAX_RECTS: usize = 64;
 pub const MAX_CURSOR: u32 = 256;
 pub const MAX_MESSAGE: usize = 64 << 20;
+pub const MAX_CLIP_TEXT: usize = 16 << 20;
+pub const MAX_CLIP_IMAGE: usize = 32 << 20;
 
 // viewer -> compositor
 pub const HELLO: u32 = 1;
@@ -39,6 +41,7 @@ pub const BYE: u32 = 110;
 pub const CLIP_HELLO: u32 = 200;
 pub const CLIP_TEXT: u32 = 201;
 pub const CLIP_WELCOME: u32 = 202;
+pub const CLIP_IMAGE: u32 = 203;
 
 pub const TRANSPORT_INLINE: u32 = 1;
 pub const TRANSPORT_SECTION: u32 = 2;
@@ -193,6 +196,12 @@ pub fn clip_hello(token: &[u8; TOKEN_BYTES]) -> Vec<u8> {
 pub fn clip_text(text: &[u8]) -> Vec<u8> {
     let mut m = Msg::new(CLIP_TEXT);
     m.bytes(text);
+    m.finish()
+}
+
+pub fn clip_image(png: &[u8]) -> Vec<u8> {
+    let mut m = Msg::new(CLIP_IMAGE);
+    m.bytes(png);
     m.finish()
 }
 

@@ -1,5 +1,5 @@
 # Clipboard bridge test: Windows -> Linux at connect, Linux -> Windows, Windows -> Linux live, with
-# multi-line text (CRLF <-> LF). Saves and restores the Windows clipboard text.
+# multi-line text (CRLF <-> LF); then images both ways. Saves and restores the Windows clipboard text.
 param([string]$Distro = "womarchy-lab")
 $root = Split-Path -Parent $PSScriptRoot   # repo root
 $exe  = "$root\windows\omarchy\target\release\omarchy.exe"
@@ -21,7 +21,14 @@ try {
     Set-Clipboard -Value "from windows $tag`r`nsecond line"
     $p = Start-Process -FilePath $exe -ArgumentList "--distro $Distro --windowed 960x540" `
         -RedirectStandardError "$out\clip-stderr.log" -RedirectStandardOutput "$out\clip-stdout.log" -PassThru -NoNewWindow
-    Start-Sleep -Seconds 10
+    # wait for the clipboard channel (a distro's first session takes longer), then a moment for the
+    # initial Windows -> Linux copy
+    $deadline = (Get-Date).AddSeconds(90)
+    while (-not (Select-String -Path "$out\clip-stderr.log" -Pattern "clipboard: connected" -Quiet -ErrorAction SilentlyContinue)) {
+        if ((Get-Date) -gt $deadline) { "FAIL clipboard never connected"; $ok = $false; break }
+        Start-Sleep -Milliseconds 500
+    }
+    Start-Sleep -Seconds 2
 
     Check "windows->linux at connect" (InSession "wl-paste --no-newline") "from windows $tag`nsecond line"
 
@@ -32,6 +39,19 @@ try {
     Set-Clipboard -Value "live windows $tag"
     Start-Sleep -Milliseconds 800
     Check "windows->linux live" (InSession "wl-paste --no-newline") "live windows $tag"
+
+    # images: a bitmap put on the Windows clipboard arrives as a PNG of the same size ...
+    # (Windows Forms' clipboard needs an STA thread: Windows PowerShell 5.1 has one)
+    powershell.exe -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; `$b = New-Object System.Drawing.Bitmap 64, 48; [System.Drawing.Graphics]::FromImage(`$b).Clear([System.Drawing.Color]::Orange); [System.Windows.Forms.Clipboard]::SetImage(`$b)"
+    Start-Sleep -Milliseconds 1200
+    Check "windows->linux image" ((InSession "wl-paste --type image/png | file -b -") -replace ',.*?(\d+ x \d+).*', ' $1') "PNG image data 64 x 48"
+
+    # ... and a PNG copied in Linux (a 40x30 screenshot) arrives as an image of the same size, with the
+    # PNG itself on the clipboard too
+    InSession "grim -g '0,0 40x30' - | wl-copy --type image/png" | Out-Null
+    Start-Sleep -Milliseconds 1200
+    $img = powershell.exe -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; `$i = [System.Windows.Forms.Clipboard]::GetImage(); if (`$i) { '{0}x{1} png={2}' -f `$i.Width, `$i.Height, [System.Windows.Forms.Clipboard]::ContainsData('PNG') }"
+    Check "linux->windows image" "$img" "40x30 png=True"
 
     $p.Refresh(); [void]$p.CloseMainWindow()
     if (-not $p.WaitForExit(15000)) { "viewer did not exit"; $p.Kill(); $ok = $false }

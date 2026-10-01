@@ -32,7 +32,8 @@
  *
  * Clipboard channel: womarchy-clipd listens on the compositor's port + WDP_CLIP_PORT_OFFSET with its own
  * 32-byte token and the same handshake (WDP_CLIP_HELLO / WDP_CLIP_WELCOME), then both sides send
- * WDP_CLIP_TEXT whenever their clipboard changes.
+ * WDP_CLIP_TEXT, or WDP_CLIP_IMAGE when the clipboard holds an image and no text, whenever their
+ * clipboard changes. (WDP_CLIP_IMAGE was added without a version bump: older peers skip it.)
  */
 #ifndef WDP_H
 #define WDP_H
@@ -50,6 +51,8 @@
 #define WDP_MAX_RECTS     64u        /* per frame; more damage is sent as its bounding box */
 #define WDP_MAX_CURSOR    256u       /* cursor image width/height */
 #define WDP_MAX_MESSAGE   (64u << 20) /* payload bytes; a full inline 4K frame is 33 MB */
+#define WDP_MAX_CLIP_TEXT  (16u << 20) /* clipboard text, bytes */
+#define WDP_MAX_CLIP_IMAGE (32u << 20) /* clipboard image (PNG), bytes */
 
 /* message types: viewer -> compositor */
 #define WDP_HELLO          1u  /* wdp_hello: must be first */
@@ -78,6 +81,7 @@
 #define WDP_CLIP_HELLO     200u /* viewer -> clipd: wdp_clip_hello */
 #define WDP_CLIP_TEXT      201u /* both ways: UTF-8 text with LF line endings; the whole payload */
 #define WDP_CLIP_WELCOME   202u /* clipd -> viewer: wdp_clip_welcome, proves clipd */
+#define WDP_CLIP_IMAGE     203u /* both ways: a PNG image; the whole payload (at most WDP_MAX_CLIP_IMAGE) */
 
 /* transports (bit numbers in wdp_hello.transports) */
 #define WDP_TRANSPORT_INLINE  1u

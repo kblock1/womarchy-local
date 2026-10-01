@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""womarchy-clipd: shares the session's Wayland clipboard with Windows through omarchy.exe (text).
+"""womarchy-clipd: shares the session's Wayland clipboard with Windows through omarchy.exe (text and
+images).
 
 Listens on vsock port WOMARCHY_VSOCK_PORT + 1 for omarchy.exe. The session token WOMARCHY_CLIP_TOKEN
 (64 hex chars) authenticates both ends: the viewer sends its first half (CLIP_HELLO), we answer with the
-second half (CLIP_WELCOME); then both sides send CLIP_TEXT (UTF-8, LF line endings) whenever their
-clipboard changes. See protocol/wdp.h. The Wayland side uses wl-clipboard (data-control, so no focus is
-needed). Clipboard entries marked as passwords (x-kde-passwordManagerHint) never leave Linux.
+second half (CLIP_WELCOME); then both sides send CLIP_TEXT (UTF-8, LF line endings), or CLIP_IMAGE (a
+PNG) when the clipboard holds an image and no text, whenever their clipboard changes. See
+protocol/wdp.h. The Wayland side uses wl-clipboard (data-control, so no focus is needed). Clipboard
+entries marked as passwords (x-kde-passwordManagerHint) never leave Linux.
 Runs as the user service womarchy-clipd.service inside the graphical session.
 """
 import hmac
@@ -18,11 +20,13 @@ import sys
 import time
 
 VERSION = 2
-CLIP_HELLO, CLIP_TEXT, CLIP_WELCOME = 200, 201, 202
+CLIP_HELLO, CLIP_TEXT, CLIP_WELCOME, CLIP_IMAGE = 200, 201, 202, 203
 CLIP_PORT_OFFSET = 1
 PROOF_BYTES = 16
 MAX_TEXT = 16 << 20
+MAX_IMAGE = 32 << 20  # PNG bytes
 HELLO_TIMEOUT = 5.0
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 HEADER = struct.Struct("<II")
 HELLO = struct.Struct(f"<I{PROOF_BYTES}s")
 PASSWORD_HINT = "x-kde-passwordManagerHint"
@@ -49,7 +53,7 @@ def recv_exact(sock, n, deadline=None):
 
 def recv_msg(sock):
     mtype, size = HEADER.unpack(recv_exact(sock, HEADER.size))
-    if size > MAX_TEXT + 64:
+    if size > MAX_IMAGE:
         raise ConnectionError(f"oversized message ({size} bytes)")
     return mtype, recv_exact(sock, size)
 
@@ -82,19 +86,32 @@ def run(cmd, data=None, capture=True):
         return None
 
 
-def wayland_text():
-    """Current clipboard text, or None (no text, or a password the user's password manager marked)."""
+def wayland_clip():
+    """The clipboard as (CLIP_TEXT, utf-8 bytes) or (CLIP_IMAGE, png bytes): text when there is any (as most
+    programs expect), else a PNG image. None when empty, too big, or a password the user's password
+    manager marked."""
     types = run(["wl-paste", "--list-types"])
-    if types is None or types.returncode != 0 or PASSWORD_HINT in types.stdout.decode("utf-8", "replace"):
+    if types is None or types.returncode != 0:
         return None
-    r = run(["wl-paste", "--no-newline", "--type", "text"])
-    return r.stdout.decode("utf-8", "replace") if r is not None and r.returncode == 0 else None
+    offered = types.stdout.decode("utf-8", "replace").split()
+    if PASSWORD_HINT in offered:
+        return None
+    if any(t.startswith("text/plain") or t in ("UTF8_STRING", "TEXT", "STRING") for t in offered):
+        r = run(["wl-paste", "--no-newline", "--type", "text"])
+        if r is not None and r.returncode == 0 and len(r.stdout) <= MAX_TEXT:
+            return CLIP_TEXT, r.stdout.decode("utf-8", "replace").encode("utf-8")
+    elif "image/png" in offered:
+        r = run(["wl-paste", "--type", "image/png"])
+        if r is not None and r.returncode == 0 and r.stdout.startswith(PNG_SIGNATURE) and len(r.stdout) <= MAX_IMAGE:
+            return CLIP_IMAGE, r.stdout
+    return None
 
 
-def set_wayland_text(text):
+def set_wayland_clip(kind, data):
     # wl-copy forks a server that owns the selection until something else is copied; that server keeps
     # any output pipes open, so capturing its output would wait for it (the timeout) on every copy
-    run(["wl-copy", "--type", "text/plain;charset=utf-8"], text.encode("utf-8"), capture=False)
+    mime = "text/plain;charset=utf-8" if kind == CLIP_TEXT else "image/png"
+    run(["wl-copy", "--type", mime], data, capture=False)
 
 
 def main():
@@ -120,7 +137,7 @@ def main():
     log(f"listening on vsock port {port}")
 
     client = None
-    last = None  # last text synced in either direction
+    last = None  # last (kind, bytes) synced in either direction
     while True:
         fds = [server, watch.stdout] + ([client] if client else [])
         ready, _, _ = select.select(fds, [], [])
@@ -129,12 +146,12 @@ def main():
             if not watch.stdout.readline():
                 log("the compositor went away; exiting")  # the session is ending: a normal stop
                 return 0
-            text = wayland_text()
-            if text is not None and text != last and len(text.encode("utf-8")) <= MAX_TEXT:
-                last = text
+            clip = wayland_clip()
+            if clip is not None and clip != last:
+                last = clip
                 if client:
                     try:
-                        send_msg(client, CLIP_TEXT, text.encode("utf-8"))
+                        send_msg(client, *clip)
                     except OSError:
                         client.close()
                         client = None
@@ -162,11 +179,15 @@ def main():
                 client = None
                 log("viewer disconnected")
                 continue
-            if mtype == CLIP_TEXT:
-                text = payload.decode("utf-8", "replace")
-                if text != last:
-                    last = text
-                    set_wayland_text(text)
+            if mtype == CLIP_TEXT and len(payload) <= MAX_TEXT:
+                clip = (CLIP_TEXT, payload.decode("utf-8", "replace").encode("utf-8"))
+            elif mtype == CLIP_IMAGE and payload.startswith(PNG_SIGNATURE):
+                clip = (CLIP_IMAGE, payload)
+            else:
+                continue
+            if clip != last:
+                last = clip
+                set_wayland_clip(*clip)
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ const DEFAULT_DISTRO: &str = "Omarchy";
 pub(crate) const ICON: &[u8] = include_bytes!("../../../linux/overlay/omarchy.ico");
 
 /// wsl.exe with UTF-8 output (it writes UTF-16 to pipes otherwise).
-fn wsl() -> Command {
+pub(crate) fn wsl() -> Command {
     let mut c = Command::new("wsl.exe");
     c.env("WSL_UTF8", "1");
     c
@@ -269,7 +269,7 @@ pub fn install(name: &str, o: &InstallOptions) -> i32 {
     }
 }
 
-fn known_folder(id: &windows::core::GUID) -> Result<PathBuf, String> {
+pub(crate) fn known_folder(id: &windows::core::GUID) -> Result<PathBuf, String> {
     unsafe {
         let p: PWSTR = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).map_err(|e| e.to_string())?;
         let path = p.to_string().map_err(|e| e.to_string());
@@ -513,5 +513,6 @@ pub fn status(name: &str) -> i32 {
     if let Ok(link) = start_menu_link(name) {
         println!("Start menu:   {}", if link.exists() { link.display().to_string() } else { "no shortcut (omarchy install)".into() });
     }
+    println!("Backup:       {}", crate::maintain::backup_summary(name));
     0
 }

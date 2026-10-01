@@ -5,6 +5,9 @@
 //!   omarchy install [IMAGE.wsl|URL] [--distro NAME] [--location DIR] [--launcher-only | --no-launcher]
 //!   omarchy uninstall [--distro NAME] [--yes]
 //!   omarchy status [--distro NAME]
+//!   omarchy update [--backup | --no-backup | --ask]           Omarchy's updater, after an optional full backup
+//!   omarchy rollback [--list] [--to POINT] [--yes]            undo the package changes of an update
+//!   omarchy backup [--to DIR] / omarchy restore [FILE]        the whole distro as one file
 //! Development: --windowed WxH [--monitors N] [--scale S], --session PATH, --port N, --stats,
 //! --dump-frame FILE [--dump-after FRAMES], --input-script FILE [--shot-dir DIR]
 //!
@@ -14,8 +17,10 @@
 //! outputs and forward input until it says goodbye. See protocol/wdp.h and docs/ARCHITECTURE.md.
 
 mod clip;
+mod clipimage;
 mod install;
 mod keymap;
+mod maintain;
 mod monitors;
 mod net;
 mod script;
@@ -68,6 +73,10 @@ fn usage() -> ! {
     println!("       omarchy install [IMAGE.wsl|URL] [--distro NAME] [--location DIR] [--launcher-only | --no-launcher]");
     println!("       omarchy uninstall [--distro NAME] [--yes]");
     println!("       omarchy status [--distro NAME]");
+    println!("       omarchy update [--backup | --no-backup | --ask]   update Omarchy (asks once whether to back up first)");
+    println!("       omarchy rollback [--list] [--to POINT] [--yes]   undo the package changes of the last update");
+    println!("       omarchy backup [--to DIR]                        save the whole distro to one file (newest kept)");
+    println!("       omarchy restore [FILE] [--yes]                   replace the distro with a backup");
     println!("development: --windowed WxH [--monitors N] [--scale S], --session PATH, --port N, --stats,");
     println!("             --dump-frame FILE [--dump-after FRAMES], --input-script FILE [--shot-dir DIR]");
     println!("Ctrl+Alt+End minimises the desktop. OMARCHY_DISTRO sets the default distro name (Omarchy).");
@@ -142,27 +151,38 @@ fn default_distro() -> String {
     std::env::var("OMARCHY_DISTRO").unwrap_or_else(|_| "Omarchy".into())
 }
 
-/// `omarchy install|uninstall|status ...`; returns None when the first argument is not a subcommand.
+/// `omarchy install|uninstall|status|update|rollback|backup|restore ...`; returns None when the first
+/// argument is not a subcommand.
 fn subcommand() -> Option<i32> {
     let argv: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     let cmd = argv.first()?.clone();
-    if !["install", "uninstall", "status"].contains(&cmd.as_str()) {
+    if !["install", "uninstall", "status", "update", "rollback", "backup", "restore"].contains(&cmd.as_str()) {
         return None;
     }
     let mut distro = default_distro();
     let mut opts = install::InstallOptions { image: None, location: None, launcher_only: false, no_launcher: false };
     let mut yes = false;
+    let mut backup_choice = None;
+    let mut ask_again = false;
+    let mut file: Option<String> = None; // install: image; restore: backup file
+    let mut to: Option<String> = None;
+    let mut passthrough = Vec::new(); // rollback: handed to womarchy-rollback
     let mut it = argv.into_iter().skip(1);
     while let Some(a) = it.next() {
-        match a.as_str() {
-            "--distro" | "-d" => distro = it.next().unwrap_or(distro),
-            "--location" => opts.location = it.next(),
-            "--launcher-only" => opts.launcher_only = true,
-            "--no-launcher" => opts.no_launcher = true,
-            "--yes" | "-y" => yes = true,
-            other if !other.starts_with('-') && cmd == "install" && opts.image.is_none() => opts.image = Some(other.to_string()),
-            other => {
-                eprintln!("omarchy {}: unknown argument: {}", cmd, other);
+        match (cmd.as_str(), a.as_str()) {
+            (_, "--distro" | "-d") => distro = it.next().unwrap_or(distro),
+            ("rollback", _) => passthrough.push(a),
+            ("install", "--location") => opts.location = it.next(),
+            ("install", "--launcher-only") => opts.launcher_only = true,
+            ("install", "--no-launcher") => opts.no_launcher = true,
+            ("uninstall" | "restore", "--yes" | "-y") => yes = true,
+            ("update", "--backup") => backup_choice = Some(true),
+            ("update", "--no-backup") => backup_choice = Some(false),
+            ("update", "--ask") => ask_again = true,
+            ("backup", "--to") => to = it.next(),
+            ("install" | "restore", other) if !other.starts_with('-') && file.is_none() => file = Some(other.to_string()),
+            (_, other) => {
+                eprintln!("omarchy {}: unknown argument: {} (omarchy --help)", cmd, other);
                 return Some(2);
             }
         }
@@ -171,9 +191,14 @@ fn subcommand() -> Option<i32> {
         eprintln!("omarchy: '{}' is not a valid distro name (letters, digits, '.', '_', '-')", distro);
         return Some(2);
     }
+    opts.image = file.clone();
     Some(match cmd.as_str() {
         "install" => install::install(&distro, &opts),
         "uninstall" => install::uninstall(&distro, yes),
+        "update" => maintain::update(&distro, backup_choice, ask_again),
+        "rollback" => maintain::rollback(&distro, &passthrough),
+        "backup" => maintain::backup(&distro, to.as_deref()),
+        "restore" => maintain::restore(&distro, file.as_deref(), yes),
         _ => install::status(&distro),
     })
 }

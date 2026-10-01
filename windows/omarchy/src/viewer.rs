@@ -615,7 +615,7 @@ fn make_cursor(img: &CursorImage) -> Option<HCURSOR> {
         let color = CreateDIBSection(None, &bmi as *const _ as *const BITMAPINFO, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
         // un-premultiply for Windows' straight-alpha cursors
         let dst = std::slice::from_raw_parts_mut(bits as *mut u8, bytes);
-        for (i, px) in img.argb[..bytes].chunks_exact(4).enumerate() {
+        for (i, px) in img.argb[..bytes].as_chunks::<4>().0.iter().enumerate() {
             let a = px[3] as u32;
             let un = |c: u8| (c as u32 * 255 + a / 2).checked_div(a).map_or(0, |v| v.min(255) as u8);
             dst[i * 4] = un(px[0]);
