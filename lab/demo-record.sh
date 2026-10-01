@@ -1,12 +1,13 @@
 #!/bin/bash
 # In-session recorder for lab/demo-gif.ps1 (run as the desktop user): once the Omarchy session is up,
-# take a grim screenshot of the desktop every ~100 ms into /tmp/womarchy-demo/frame-<unix ms>.png,
-# until /tmp/womarchy-demo/stop exists (or 4 minutes pass).
+# take a grim screenshot of the desktop every ~100 ms into ~/.cache/womarchy-demo/frame-<unix ms>.png,
+# until ~/.cache/womarchy-demo/stop exists (or 4 minutes pass). On disk, not in /tmp: a minute of
+# 1080p PNGs is about a gigabyte, and /tmp is RAM.
 #
 # Recording inside the session shows exactly what the compositor drew, and keeps working when Windows
 # isn't showing it (a locked screen, monitors asleep).
 set -u
-out=/tmp/womarchy-demo
+out=$HOME/.cache/womarchy-demo
 rm -rf "$out"
 mkdir -p "$out"
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Turn a recorded demo run into the README's animated GIF.
 
-    python lab/make-demo-gif.py RUN_DIR OUT.gif
+    python lab/make-demo-gif.py RUN_DIR OUT.gif [--clock-offset MS]
 
 RUN_DIR comes from lab/demo-gif.ps1 and contains:
   frame-<unix ms>.png   screenshots of the desktop taken inside the session (lab/demo-record.sh),
-                        several per second; named by the Linux clock, which WSL keeps in step with
-                        Windows'
+                        several per second, named by the Linux clock (--clock-offset: Linux minus
+                        Windows time, measured by demo-gif.ps1)
   viewer.log            omarchy.exe's log, with "[omarchy] script: mark <unix ms> <scene>" lines from
                         lab/scripts-omarchy-demo.txt (each mark starts a captioned scene)
 
@@ -14,9 +14,9 @@ The GIF starts with a short title card (a terminal typing `omarchy`), then shows
 first mark to the "end" mark with a caption per scene. One palette for all frames keeps unchanged
 areas identical between frames, which is what keeps a GIF small.
 """
+import argparse
 import os
 import re
-import sys
 from PIL import Image, ImageDraw, ImageFont
 
 WIDTH, HEIGHT = 960, 540
@@ -66,21 +66,30 @@ def title_frames():
 
 
 def main():
-    run, out = sys.argv[1], sys.argv[2]
+    ap = argparse.ArgumentParser(description="Turn a recorded demo run into an animated GIF.")
+    ap.add_argument("run")
+    ap.add_argument("out")
+    ap.add_argument("--clock-offset", type=int, default=0, help="Linux clock minus Windows clock, in ms")
+    a = ap.parse_args()
+    run, out = a.run, a.out
     marks = []
     for line in open(os.path.join(run, "viewer.log"), encoding="utf-8", errors="replace"):
         m = re.search(r"script: mark (\d+) (\S+)", line)
         if m:
             marks.append((int(m.group(1)), m.group(2)))
     if not marks or marks[-1][1] != "end":
-        sys.exit("viewer.log has no marks ending in 'end'; did the demo script finish?")
-    shots = sorted((int(m.group(1)), os.path.join(run, f)) for f in os.listdir(run) if (m := re.fullmatch(r"frame-(\d+)\.png", f)))
+        raise SystemExit("viewer.log has no marks ending in 'end'; did the demo script finish?")
+    # frame times on the Windows clock, like the marks
+    shots = sorted((int(m.group(1)) - a.clock_offset, os.path.join(run, f))
+                   for f in os.listdir(run) if (m := re.fullmatch(r"frame-(\d+)\.png", f)))
     start, end = marks[0][0], marks[-1][0]
     shots = [s for s in shots if start <= s[0] <= end]
     if not shots:
-        sys.exit("no captured frames between the first mark and 'end'")
+        raise SystemExit("no captured frames between the first mark and 'end'")
 
     frames = title_frames()
+    samples = [frames[-1][0]]  # the finished title card
+    scenes = {}
     for i, (t, path) in enumerate(shots):
         scene = [name for at, name in marks if at <= t][-1]
         img = Image.open(path).convert("RGB").resize((WIDTH, HEIGHT), Image.LANCZOS)
@@ -88,11 +97,14 @@ def main():
             caption(img, CAPTIONS[scene])
         nxt = shots[i + 1][0] if i + 1 < len(shots) else t + 1500
         frames.append((img, max(80, min(nxt - t, 600))))
+        scenes.setdefault(scene, []).append(img)
+    samples += [imgs[len(imgs) // 2] for imgs in scenes.values()]  # the middle of each scene
 
-    # one palette from a sample of frames, then every frame mapped onto it (no dithering)
-    sample = Image.new("RGB", (WIDTH, HEIGHT * 4))
-    for k, idx in enumerate(range(0, len(frames), max(1, len(frames) // 4))[:4]):
-        sample.paste(frames[idx][0], (0, HEIGHT * k))
+    # one palette from the samples (so every scene's colours, e.g. each theme's, are in it), then every
+    # frame mapped onto it without dithering
+    sample = Image.new("RGB", (WIDTH, HEIGHT * len(samples)))
+    for k, img in enumerate(samples):
+        sample.paste(img, (0, HEIGHT * k))
     palette = sample.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
     images, durations = [], []
     for img, ms in frames:
