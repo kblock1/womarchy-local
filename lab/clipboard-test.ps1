@@ -2,6 +2,7 @@
 # multi-line text (CRLF <-> LF); then images both ways. Saves and restores the Windows clipboard text.
 param([string]$Distro = "womarchy-lab")
 $root = Split-Path -Parent $PSScriptRoot   # repo root
+. "$PSScriptRoot\assert-desktop.ps1"   # stops if Windows is locked
 $exe  = "$root\windows\omarchy\target\release\omarchy.exe"
 $out  = "$root\lab\out"
 $saved = Get-Clipboard -Raw -ErrorAction SilentlyContinue

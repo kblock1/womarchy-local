@@ -5,6 +5,7 @@
 #   pwsh lab\fullscreen-test.ps1 -Distro <distro with mesa-utils + vulkan-tools>
 param([Parameter(Mandatory = $true)][string]$Distro)
 $root = Split-Path -Parent $PSScriptRoot
+. "$PSScriptRoot\assert-desktop.ps1"   # stops if Windows is locked
 $exe  = "$root\windows\omarchy\target\release\omarchy.exe"
 $out  = "$root\lab\out\fullscreen"
 New-Item -ItemType Directory -Force $out | Out-Null

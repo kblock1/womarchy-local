@@ -4,6 +4,7 @@
 param([string]$Distro = "womarchy-lab",
       [string]$Session = "")
 $root = Split-Path -Parent $PSScriptRoot   # repo root
+. "$PSScriptRoot\assert-desktop.ps1"   # stops if Windows is locked
 # default: this checkout's womarchy-session (it has --update-monitors), as WSL sees the repo
 if (-not $Session) { $Session = "/mnt/" + $root.Substring(0, 1).ToLower() + ($root.Substring(2) -replace '\\', '/') + "/linux/packages/womarchy-session/womarchy-session" }
 $exe  = "$root\windows\omarchy\target\release\omarchy.exe"

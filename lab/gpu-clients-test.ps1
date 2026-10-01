@@ -2,6 +2,7 @@
 # windowed omarchy session and report their frame rates / errors, plus a frame dump.
 param([string]$Distro = "womarchy-lab", [int]$Seconds = 12)
 $root = Split-Path -Parent $PSScriptRoot   # repo root
+. "$PSScriptRoot\assert-desktop.ps1"   # stops if Windows is locked
 $exe  = "$root\windows\omarchy\target\release\omarchy.exe"
 $out  = "$root\lab\out"
 $p = Start-Process -FilePath $exe -ArgumentList "--distro $Distro --windowed 1280x720 --stats --dump-frame $out\gpu-clients.bmp --dump-after 480" `

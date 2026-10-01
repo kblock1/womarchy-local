@@ -10,6 +10,7 @@
 //!   scroll N                 wheel N notches (positive = down)
 //!   shot PATH                screenshot inside the session (grim): a Linux path (/...), or a path
 //!                            relative to `--shot-dir` (default: the current directory) on Windows
+//!   mark TEXT                log "[omarchy] script: mark <unix ms> TEXT" (to line up recordings)
 //!   quit                     end the session like closing the window
 //!
 //! Screenshots come from the compositor itself, so they show exactly what Hyprland composited.
@@ -286,6 +287,11 @@ pub fn run(opts: Options, output_id: u32) {
                 send(wdp::pointer_axis(now_ms(), 0, 15.0 * n as f64, 120 * n));
             }
             "shot" => screenshot(&t, arg),
+            "mark" => {
+                // a timestamped line in the log, e.g. for tools that line up their own recording
+                let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                eprintln!("[omarchy] script: mark {} {}", ms, arg);
+            }
             "quit" => {
                 send(wdp::quit());
                 return;

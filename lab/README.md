@@ -29,7 +29,10 @@ end-to-end tests ([docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md#tests)). Outputs 
 | `installer-test.ps1` | `omarchy install` / `uninstall` on a throwaway distro (`omarchy-test-e2e`), without touching the user's PATH or Start menu. |
 | `system-health.ps1` | After a work session: WSL settings untouched; every distro boots and reports its systemd state. |
 | `correlate-frames.ps1` | Per-frame timelines, Linux (send → ack) against the viewer (receive → ack). |
-| `scripts-*.txt` | `--input-script` scenarios used by the tests (tour, HiDPI, browser, X11, lock, logout, system menu, full screen). |
+| `scripts-*.txt` | `--input-script` scenarios used by the tests (tour, HiDPI, browser, X11, lock, logout, system menu, full screen, demo). |
+| `demo-gif.ps1` | Records the README's demo GIF on a throwaway distro: runs `scripts-omarchy-demo.txt` windowed, records inside the session (`demo-record.sh`, grim), and builds the GIF with `make-demo-gif.py` (title card, a caption per `mark`). |
+
+The tests that show the desktop dot-source `assert-desktop.ps1`, which stops them while Windows is locked: presents and the clipboard stall then, so the results would be false failures.
 
 ## Benchmarks (C / Python; build with `cc -O2`, see each file's header)
 

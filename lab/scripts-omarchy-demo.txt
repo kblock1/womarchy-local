@@ -1,0 +1,42 @@
+# The README demo (lab/demo-gif.ps1): the desktop, a terminal with fastfetch, Omarchy's menu, live
+# theme changes, and OpenGL + Vulkan apps on the GPU. Each `mark` starts a captioned scene of the GIF
+# (lab/make-demo-gif.py); `mark end` ends it. Needs mesa-utils and vulkan-tools in the distro.
+sleep 5000
+key super+shift+comma
+sleep 1500
+mark desktop
+sleep 3000
+mark terminal
+key super+Return
+sleep 2500
+type fastfetch
+key Return
+sleep 5000
+mark menu
+key super+space
+sleep 4000
+key Escape
+sleep 800
+mark theme
+type clear
+key Return
+type omarchy theme set "Catppuccin Latte"
+key Return
+sleep 6000
+type clear
+key Return
+type omarchy theme set "Gruvbox"
+key Return
+sleep 6000
+mark apps
+type clear
+key Return
+type es2gears_wayland >/dev/null &
+key Return
+sleep 2500
+type vkcube --wsi wayland >/dev/null &
+key Return
+sleep 7000
+mark end
+sleep 500
+quit
