@@ -114,6 +114,17 @@ first=$(grep -v '^\[options\]' "$tmp" | grep -m1 -E '^\[[A-Za-z0-9_-]+\]' || tru
 [[ $first == "[womarchy]" ]] || fail "[womarchy] would not be the first repository (first is '$first')"
 install -m 0644 "$tmp" "$CONF"
 
+# A [womarchy] database cached from before signatures were required has no .sig. pacman would print
+# "womarchy: missing required signature" for it (harmlessly, before downloading the signed one) on
+# the next sync: drop it, so that sync simply downloads.
+if [[ $siglevel == "$SIGNED_SIGLEVEL" ]]; then
+  for db in womarchy.db womarchy.files; do
+    if [[ -f /var/lib/pacman/sync/$db && ! -f /var/lib/pacman/sync/$db.sig ]]; then
+      rm -f "/var/lib/pacman/sync/$db"
+    fi
+  done
+fi
+
 # WSL mounts /usr/lib/modules/$(uname -r) as an overlay whose upper layer is
 # VM-wide: every distro in the WSL VM sees writes to it. No package here owns a
 # kernel, so kmod's depmod hook could only ever rewrite WSL's shared module
