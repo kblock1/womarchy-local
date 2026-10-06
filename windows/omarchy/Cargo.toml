@@ -1,6 +1,6 @@
 [package]
 name = "omarchy"
-version = "0.2.0"
+version = "0.2.0+local.1"
 edition = "2021"
 description = "Windows launcher and viewer for Omarchy running in WSL2 (womarchy)"
 license = "MIT"

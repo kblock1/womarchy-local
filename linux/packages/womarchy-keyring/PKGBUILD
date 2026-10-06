@@ -2,7 +2,8 @@
 # Installs the keyring files pacman-key reads (`pacman-key --populate womarchy`):
 # womarchy.gpg (the public key, from womarchy.asc), womarchy-trusted (fingerprint:
 # trust level; lsigned on populate) and womarchy-revoked. The private key lives only
-# in the CI signing environment.
+# in the CI signing environment, or for local builds in the womarchy-build distro
+# (linux/packages/local-key.sh writes its public half here).
 pkgname=womarchy-keyring
 pkgver=20261001
 pkgrel=1

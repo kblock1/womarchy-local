@@ -1,11 +1,14 @@
 blank_issues_enabled: true
 contact_links:
   - name: Troubleshooting guide
-    url: https://github.com/sytelus/womarchy/blob/main/docs/TROUBLESHOOTING.md
+    url: https://github.com/kblock1/womarchy-local/blob/main/docs/TROUBLESHOOTING.md
     about: Logs, common problems and their fixes.
   - name: Report a security problem privately
-    url: https://github.com/sytelus/womarchy/security/advisories/new
+    url: https://github.com/kblock1/womarchy-local/security/advisories/new
     about: Please don't file security problems as public issues.
+  - name: womarchy itself (also in upstream's build)
+    url: https://github.com/sytelus/womarchy/issues/new/choose
+    about: Problems that aren't specific to this copy's local build or its fixes.
   - name: Omarchy itself (not specific to WSL)
     url: https://github.com/omacom/omarchy/issues
     about: Problems that also happen on a regular Omarchy install.

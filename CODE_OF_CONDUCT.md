@@ -6,6 +6,6 @@ In short: be respectful and constructive, assume good intent, and help make this
 people of every background and experience level. Harassment, personal attacks and discriminatory
 language are not tolerated.
 
-To report a problem privately, use [a private advisory](https://github.com/sytelus/womarchy/security/advisories/new)
+To report a problem privately, use [a private advisory](https://github.com/kblock1/womarchy-local/security/advisories/new)
 (it reaches the maintainers only). Maintainers may remove comments, issues or contributions that break
 these rules, and block repeat offenders.

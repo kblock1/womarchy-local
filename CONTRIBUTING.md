@@ -1,23 +1,17 @@
 # Contributing
 
-Thanks for helping! Contributions here happen through **issues**: bug reports, test results from other
-GPUs and machines, ideas, and proposed fixes.
+This is a copy of [sytelus/womarchy](https://github.com/sytelus/womarchy) that you build yourself ([LOCAL-BUILD.md](LOCAL-BUILD.md)).
 
-## We don't accept pull requests directly
+## Where to report what
 
-Please [open an issue](https://github.com/sytelus/womarchy/issues/new/choose) instead, even if you've
-already written the code. Describe the problem and your change, and paste a patch or link your branch.
-The issue forms have a field for it. If the change goes in, we make it ourselves and credit you.
-Pull requests opened anyway may be closed with a pointer to this page.
-
-## Reporting a problem
-
-[Open an issue](https://github.com/sytelus/womarchy/issues/new/choose). The bug form asks for the
-output of `omarchy status` and the session logs; [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) says
-where they are. Remove anything private before posting. Security problems: see [SECURITY.md](SECURITY.md).
-
-Reports from hardware we haven't tested are especially useful: so far only one NVIDIA machine has
-been tested. Tell us what worked too, not only what broke.
+- **Problems with this copy** (the local build tooling, or the fixes listed in LOCAL-BUILD.md):
+  [open an issue here](https://github.com/kblock1/womarchy-local/issues/new/choose). The bug form asks for the output of `omarchy status`
+  and the session logs; [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) says where they are. Remove
+  anything private before posting.
+- **Problems in womarchy itself** (they also happen with upstream's build): report them
+  [upstream](https://github.com/sytelus/womarchy/issues/new/choose). Upstream takes issues, not pull requests: describe the problem
+  and the fix, and link a branch if you have one.
+- **Security problems:** see [SECURITY.md](SECURITY.md).
 
 ## Working on the code
 

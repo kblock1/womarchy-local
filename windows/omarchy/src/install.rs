@@ -25,9 +25,6 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Shell::{FOLDERID_LocalAppData, FOLDERID_Programs, IShellLinkW, SHGetKnownFolderPath, ShellLink, KF_FLAG_DEFAULT};
 use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_SHOWMINNOACTIVE, WM_SETTINGCHANGE};
 
-/// Where `omarchy install` fetches the image when no file is given and none sits next to omarchy.exe.
-/// Each release publishes Omarchy.wsl and Omarchy.wsl.sha256.
-pub const DEFAULT_IMAGE_URL: &str = "https://github.com/sytelus/womarchy/releases/latest/download/Omarchy.wsl";
 /// Oldest WSL we support: the one we develop and test on. (2.5 already has the features we use, such as
 /// `wslinfo --vm-id` and `--install --from-file --name`, but its kernel and WSLg are untested.) install.ps1
 /// updates WSL to at least this version.
@@ -148,8 +145,9 @@ fn download(url: &str, dest: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// The image to install: the argument (file or https URL), else an Omarchy*.wsl next to omarchy.exe,
-/// else the latest release. Downloads are checked against the published SHA-256.
+/// The image to install: the argument (file or https URL), else an Omarchy*.wsl next to omarchy.exe.
+/// (Local builds: no download fallback; images are built locally, see LOCAL-BUILD.md.) Downloads
+/// are checked against the published SHA-256.
 fn resolve_image(arg: Option<&str>) -> Result<(PathBuf, bool), String> {
     let source = match arg {
         Some(a) => a.to_string(),
@@ -162,10 +160,10 @@ fn resolve_image(arg: Option<&str>) -> Result<(PathBuf, bool), String> {
                     })
                     .max()
             });
-            match local {
-                Some(p) => return Ok((p, false)),
-                None => DEFAULT_IMAGE_URL.to_string(),
-            }
+            return match local {
+                Some(p) => Ok((p, false)),
+                None => Err("no image given: build one (LOCAL-BUILD.md) and run:  omarchy install PATH\\TO\\Omarchy.wsl".into()),
+            };
         }
     };
     if source.starts_with("http://") {

@@ -1,8 +1,9 @@
 # Omarchy on WSL with full GUI and Graphics
 
-[![checks](https://github.com/sytelus/womarchy/actions/workflows/checks.yml/badge.svg)](https://github.com/sytelus/womarchy/actions/workflows/checks.yml)
-[![release](https://img.shields.io/github/v/release/sytelus/womarchy)](https://github.com/sytelus/womarchy/releases/latest)
-[![license](https://img.shields.io/github/license/sytelus/womarchy)](LICENSE)
+> [!IMPORTANT]
+> **This copy builds everything on your own PC.** It is [sytelus/womarchy](https://github.com/sytelus/womarchy)
+> plus a few fixes, signed with your own key, with nothing downloaded from upstream's releases. Skip
+> the `irm ... | iex` install below and follow **[LOCAL-BUILD.md](LOCAL-BUILD.md)**.
 
 **Your [Omarchy](https://omarchy.org) desktop on Windows 11, one command away.** It runs in
 [WSL](https://learn.microsoft.com/windows/wsl/about), full screen on every monitor, on your GPU. No
@@ -28,15 +29,19 @@ prompt back.
 
 **You need:** Windows 11 and a GPU driver with WSL support (any current NVIDIA, AMD or Intel driver).
 
-Open **PowerShell** (no need to run it as administrator) and paste:
+This copy downloads nothing from upstream's releases: you build `omarchy.exe` and the Omarchy image
+yourself, then install them. In **PowerShell** (no need to run it as administrator), in a clone of this
+repository at a path without spaces:
 
 ```powershell
-irm https://raw.githubusercontent.com/sytelus/womarchy/main/install.ps1 | iex
+tools\local-setup.ps1    # once: the build distro and your own signing key
+tools\local-build.ps1    # packages, signed repo, image, omarchy.exe; ends with the install command
 ```
 
-The installer explains what it will do and asks before changing anything. It then:
+[LOCAL-BUILD.md](LOCAL-BUILD.md) has the requirements and details. The installer (`install.ps1 -Image ...
+-Exe ...`) explains what it will do and asks before changing anything. It then:
 1. installs or updates WSL if needed;
-2. downloads Omarchy (about 1.7 GB; it needs about 7 GB of disk);
+2. imports your image as the `Omarchy` distro (it needs about 7 GB of disk);
 3. asks you to choose a user name and password.
 
 ## Use
@@ -60,7 +65,7 @@ Problems? See [Troubleshooting](docs/TROUBLESHOOTING.md).
 > [!WARNING]
 > **Work in progress, and so far it "works on my machine".** It was developed and tested on one PC
 > (Windows 11, NVIDIA RTX 5070, three 4K monitors). Expect rough edges elsewhere, and please
-> [tell us](https://github.com/sytelus/womarchy/issues/new/choose) how it went.
+> [tell us](https://github.com/kblock1/womarchy-local/issues/new/choose) how it went.
 > - **WSL gets upgraded.** womarchy needs WSL 3.0.1 or later, so the installer updates WSL (or installs it). Your other WSL distros keep their files, but WSL restarts and anything running in it stops. Windows asks for administrator permission and may need a restart.
 > - Some Ubuntu distros then report a harmless `degraded` state; [here's the fix](docs/TROUBLESHOOTING.md#other-wsl-distros-after-the-wsl-update).
 > - womarchy adds a WSL distro named "Omarchy", a Start menu entry and the `omarchy` command for your user. Nothing else on Windows changes.
@@ -105,10 +110,10 @@ ends, the bugs and how each was found. Then see [the architecture](docs/ARCHITEC
 
 ## Contributing
 
-**Issues are the way to contribute.** [Open an issue](https://github.com/sytelus/womarchy/issues/new/choose)
-for bugs, ideas, or a test report from your machine (what worked is useful too). We don't accept pull
-requests directly: if you have a fix, describe it in an issue, with a link to your branch if you like.
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md).
+Problems with this copy (the local build, or the fixes listed in [LOCAL-BUILD.md](LOCAL-BUILD.md)):
+[open an issue here](https://github.com/kblock1/womarchy-local/issues/new/choose). Problems in womarchy itself belong
+[upstream](https://github.com/sytelus/womarchy), which takes issues rather than pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Security problems: [SECURITY.md](SECURITY.md).
 
 ## Thanks
 

@@ -1,7 +1,4 @@
-> [!NOTE]
-> **Thanks! This project doesn't accept pull requests directly.** Please
-> [open an issue](https://github.com/sytelus/womarchy/issues/new/choose) instead: describe the problem
-> and your change, and link this branch. If the change goes in, we make it and credit you.
-> See [CONTRIBUTING.md](https://github.com/sytelus/womarchy/blob/main/CONTRIBUTING.md).
+<!-- Say what changed and why, and how it was tested (tools\local-build.ps1, cargo test, verify-image.sh). -->
 
-<!-- Maintainers' own pull requests: say what changed and why, and how it was tested. -->
+<!-- A fix for womarchy itself belongs upstream too: upstream takes issues, not pull requests, so describe it
+in an issue there (https://github.com/sytelus/womarchy/issues/new/choose) and link this branch. -->

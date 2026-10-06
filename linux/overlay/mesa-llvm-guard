@@ -39,9 +39,9 @@ cat >&2 <<MSG
     llvm-libs would be upgraded to $new_ver, which provides $new_so.
     womarchy's Mesa ($mesa_ver) is built against $need, so after this update the
     d3d12 GPU driver would fail to load (no GPU acceleration, possibly no desktop).
-    Nothing was changed. womarchy will publish a Mesa build for the new LLVM; see
-    https://github.com/sytelus/womarchy/issues?q=label%3Arebuild-needed
-    and run the update again later.
+    Nothing was changed. Rebuild womarchy's Mesa for the new LLVM on Windows
+    (tools\local-build.ps1 -Sync -Packages mesa-womarchy; see LOCAL-BUILD.md),
+    then run the update again.
 
 MSG
 exit 1

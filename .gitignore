@@ -12,3 +12,25 @@ windows/omarchy/target/
 # Test and experiment outputs
 lab/out/
 __pycache__/
+
+# Secrets: never commit these (tools/check-secrets.py also scans what is tracked). The repo key's
+# public half (linux/packages/womarchy-keyring/womarchy.asc) and omarchy-key.env stay tracked.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.gpg
+*.kbx
+*.rev
+*secret*.asc
+*private*.asc
+.gnupg/
+*-gnupg/
+openpgp-revocs.d/
+private-keys-v1.d/
+# Exported or copied WSL distros (the build distro holds the signing key)
+*.vhdx
+*.tar
+*.wsl

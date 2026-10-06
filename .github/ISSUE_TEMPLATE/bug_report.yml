@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting! The [troubleshooting guide](https://github.com/sytelus/womarchy/blob/main/docs/TROUBLESHOOTING.md) covers common problems.
+        Thanks for reporting! The [troubleshooting guide](https://github.com/kblock1/womarchy-local/blob/main/docs/TROUBLESHOOTING.md) covers common problems.
         Problems with Omarchy itself that also happen outside WSL belong to [Omarchy](https://github.com/omacom/omarchy/issues).
   - type: textarea
     id: what

@@ -3,15 +3,17 @@
     Installs Omarchy (Arch Linux + Hyprland) as a GPU-accelerated desktop on Windows 11, using WSL.
 
 .DESCRIPTION
-    Run it from PowerShell (no administrator rights needed; Windows asks for them once if WSL itself
-    has to be installed or updated):
+    Run it from PowerShell in your checkout (no administrator rights needed; Windows asks for them once
+    if WSL itself has to be installed or updated), with what tools\local-build.ps1 built:
 
-        irm https://raw.githubusercontent.com/sytelus/womarchy/main/install.ps1 | iex
+        .\install.ps1 -Image out\Omarchy-<version>-womarchy-<date>.wsl -Exe windows\omarchy\target\release\omarchy.exe
+
+    This copy downloads nothing from upstream's releases (see LOCAL-BUILD.md).
 
     Before changing anything it explains what it will do and asks for confirmation:
       1. WSL: installs it, or updates it to the tested version or newer, if needed. This affects all
          your WSL distros (they keep their files), restarts WSL, and may need a Windows restart.
-      2. Downloads omarchy.exe and the Omarchy WSL image (about 1.7 GB) from the latest release.
+      2. Uses the omarchy.exe and Omarchy WSL image you built.
       3. Runs `omarchy install`: imports the image as a new WSL distro named "Omarchy", asks you to pick
          a user name and password, and adds a Start menu entry and the `omarchy` command.
     Undo everything with:  omarchy uninstall
@@ -19,9 +21,10 @@
 .PARAMETER Distro
     Name of the WSL distro to create (default: Omarchy).
 .PARAMETER Image
-    Install from this .wsl file or https URL instead of the latest release.
+    The Omarchy .wsl image to install (out\Omarchy-*.wsl from tools\local-build.ps1). Required unless the
+    distro already exists.
 .PARAMETER Exe
-    Use this omarchy.exe instead of downloading it (for testing a build).
+    The omarchy.exe to install (windows\omarchy\target\release\omarchy.exe). Required.
 .PARAMETER Yes
     Don't ask for confirmation.
 .PARAMETER NoLauncher
@@ -38,9 +41,8 @@ param(
 # Native commands are checked through $LASTEXITCODE; with "Stop", Windows PowerShell 5.1 would turn any
 # stderr output of a redirected native command into a terminating error.
 $ErrorActionPreference = "Continue"
-$Release = "https://github.com/sytelus/womarchy/releases/latest/download"
 $TestedWsl = [version]"3.0.1"   # the WSL version Omarchy is developed and tested on
-$Docs = "https://github.com/sytelus/womarchy/blob/main/docs/TROUBLESHOOTING.md"
+$Docs = if ($PSScriptRoot) { Join-Path $PSScriptRoot "docs\TROUBLESHOOTING.md" } else { "docs\TROUBLESHOOTING.md in your checkout" }
 
 function Say($text, $color = "Gray") { Write-Host $text -ForegroundColor $color }
 function Stop-Install($text) {
@@ -90,11 +92,6 @@ function Test-Distro($name) {
     }
 }
 
-function Get-File($url, $dest) {
-    & curl.exe -L --fail --proto "=https" --progress-bar -o $dest $url
-    if ($LASTEXITCODE -ne 0) { Stop-Install "Download failed: $url" }
-}
-
 # --- what we are about to do -------------------------------------------------------------------------
 Say "`nOmarchy for WSL installer`n" Cyan
 
@@ -116,11 +113,18 @@ if (-not $wsl) {
 # Re-running the installer over an existing install keeps the distro and only updates omarchy.exe and
 # its shortcuts (`omarchy install` skips the image when the distro exists).
 $existing = $wsl -and (Test-Distro $Distro)
-if (-not $Exe) { $steps += "Download omarchy.exe from $Release." }
+# This copy downloads nothing: omarchy.exe and the image come from tools\local-build.ps1 (LOCAL-BUILD.md).
+if (-not $Exe) {
+    Stop-Install "Pass the omarchy.exe you built: -Exe windows\omarchy\target\release\omarchy.exe (tools\local-build.ps1 prints the full command; see LOCAL-BUILD.md)."
+}
+if (-not $existing -and -not $Image) {
+    Stop-Install "Pass the image you built: -Image out\Omarchy-<version>-womarchy-<date>.wsl (tools\local-build.ps1 prints the full command; see LOCAL-BUILD.md)."
+}
+$steps += "Use omarchy.exe from $Exe."
 if ($existing) {
     $steps += "Keep your existing '$Distro' distro as it is, and update omarchy.exe, the Start menu entry and the 'omarchy' command. (To update the Linux side, run 'omarchy update'.)"
 } else {
-    if (-not $Image) { $steps += "Download the Omarchy image (about 1.7 GB; it needs about 7 GB of disk once installed)." }
+    $steps += "Install the Omarchy image $Image (it needs about 7 GB of disk once installed)."
     $steps += "Create a new WSL distro named '$Distro' (your other WSL distros are not touched), ask you for a user name and password, and add 'Omarchy' to the Start menu and the 'omarchy' command."
 }
 
@@ -161,18 +165,8 @@ Say "WSL $wsl is ready."
 $work = Join-Path $env:TEMP ("omarchy-install-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force $work -ErrorAction Stop | Out-Null
 try {
-    if ($Exe) {
-        if (-not (Test-Path $Exe)) { Stop-Install "$Exe not found." }
-        Copy-Item $Exe (Join-Path $work "omarchy.exe") -ErrorAction Stop
-    } else {
-        Say "`nDownloading omarchy.exe ..." Cyan
-        $exePath = Join-Path $work "omarchy.exe"
-        Get-File "$Release/omarchy.exe" $exePath
-        Get-File "$Release/omarchy.exe.sha256" "$exePath.sha256"
-        $want = ((Get-Content "$exePath.sha256" -Raw) -split '\s+')[0].ToLower()
-        $got = (Get-FileHash -Algorithm SHA256 $exePath).Hash.ToLower()
-        if ($got -ne $want) { Stop-Install "The omarchy.exe download is corrupt (SHA-256 mismatch); try again." }
-    }
+    if (-not (Test-Path $Exe)) { Stop-Install "$Exe not found." }
+    Copy-Item $Exe (Join-Path $work "omarchy.exe") -ErrorAction Stop
 
     # --- 3. the distro, first-run setup, Start menu entry and PATH (all done by omarchy.exe) ------------
     Say "`nInstalling Omarchy ..." Cyan
