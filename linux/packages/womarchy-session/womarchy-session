@@ -158,6 +158,9 @@ export PATH
 export HYPRLAND_BACKEND=wsl WOMARCHY_VM_ID=$VMID WOMARCHY_TOKEN WOMARCHY_CLIP_TOKEN WOMARCHY_VSOCK_PORT WOMARCHY_MONITORS
 if [ -e /dev/dxg ]; then
   export GALLIUM_DRIVER=${GALLIUM_DRIVER:-d3d12} # Mesa picks llvmpipe on WSL unless told
+  # WOMARCHY_GPU_ADAPTER (/etc/womarchy/config) picks the d3d12 adapter by part of its name
+  gpu_adapter=$(sed -n 's/^WOMARCHY_GPU_ADAPTER=//p' /etc/womarchy/config 2>/dev/null | tail -n1)
+  case $gpu_adapter in ''|*[!A-Za-z0-9._-]*) ;; *) export MESA_D3D12_DEFAULT_ADAPTER_NAME=${MESA_D3D12_DEFAULT_ADAPTER_NAME:-$gpu_adapter} ;; esac
 else
   # no GPU paravirtualization (old driver, or GPU support off): Mesa falls back to software rendering
   say "no /dev/dxg: rendering in software"

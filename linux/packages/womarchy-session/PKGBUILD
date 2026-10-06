@@ -1,7 +1,7 @@
 # womarchy: session entry point for omarchy.exe (Omarchy on WSL)
 pkgname=womarchy-session
 pkgver=0.1.0
-pkgrel=15
+pkgrel=16
 pkgdesc='Starts the Omarchy desktop session for the omarchy.exe viewer on WSL (Hyprland wsl backend)'
 arch=(any)
 url='https://github.com/sytelus/womarchy'

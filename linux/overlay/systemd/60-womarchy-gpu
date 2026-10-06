@@ -9,6 +9,13 @@ dxg=${WOMARCHY_DXG:-/dev/dxg}
 if [ -z "${GALLIUM_DRIVER+x}" ] && [ -e "$dxg" ]; then
   echo GALLIUM_DRIVER=d3d12
 fi
+# WOMARCHY_GPU_ADAPTER in /etc/womarchy/config picks the d3d12 adapter by part of its
+# name (with several GPUs, Mesa's own choice can be the integrated one). WOMARCHY_CONFIG: tests.
+adapter=$(sed -n 's/^WOMARCHY_GPU_ADAPTER=//p' "${WOMARCHY_CONFIG:-/etc/womarchy/config}" 2>/dev/null | tail -n1)
+case $adapter in *[!A-Za-z0-9._-]*) adapter= ;; esac
+if [ -z "${MESA_D3D12_DEFAULT_ADAPTER_NAME+x}" ] && [ -n "$adapter" ] && [ -e "$dxg" ]; then
+  echo "MESA_D3D12_DEFAULT_ADAPTER_NAME=$adapter"
+fi
 # GTK4: the GL renderer (works on d3d12 and llvmpipe); its Vulkan path would run on
 # the non-conformant Dozen driver.
 if [ -z "${GSK_RENDERER+x}" ]; then

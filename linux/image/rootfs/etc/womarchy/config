@@ -13,6 +13,12 @@ WOMARCHY_DOCKER=1
 # 0: Windows' Hyper-V firewall and WSL NAT gate inbound traffic; ufw stays masked.
 WOMARCHY_FIREWALL=0
 
+# The GPU Mesa's d3d12 driver renders on, by part of its name (MESA_D3D12_DEFAULT_ADAPTER_NAME;
+# letters, digits, . _ - only), e.g. NVIDIA. Empty: Mesa's own choice, which on a PC with an
+# integrated GPU and a discrete card can be the integrated one. Read at login (log out and back in
+# after a change).
+WOMARCHY_GPU_ADAPTER=
+
 # The hosted [womarchy] repository (listed first; the image's local copy in
 # /var/lib/womarchy/repo is the offline fallback). Change it for a mirror or fork.
 WOMARCHY_REPO_URL=https://github.com/sytelus/womarchy/releases/download/packages

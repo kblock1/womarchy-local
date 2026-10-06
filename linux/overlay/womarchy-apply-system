@@ -61,11 +61,12 @@ export OMARCHY_MIRROR="${OMARCHY_MIRROR:-stable}"
 
 # --- settings: environment > /etc/womarchy/config > default ---------------------------
 CONFIG=/etc/womarchy/config
-declare -A DEFAULTS=([WOMARCHY_DOCKER]=1 [WOMARCHY_FIREWALL]=0
+declare -A DEFAULTS=([WOMARCHY_DOCKER]=1 [WOMARCHY_FIREWALL]=0 [WOMARCHY_GPU_ADAPTER]=
                      [WOMARCHY_REPO_URL]=https://github.com/sytelus/womarchy/releases/download/packages)
 valid_setting() { # KEY VALUE
   case $1 in
     WOMARCHY_DOCKER|WOMARCHY_FIREWALL) [[ $2 == [01] ]] ;;
+    WOMARCHY_GPU_ADAPTER) [[ $2 =~ ^[A-Za-z0-9._-]*$ ]] ;;
     WOMARCHY_REPO_URL) [[ $2 =~ ^(https://[A-Za-z0-9.-]+|file://)/[A-Za-z0-9._~/%+-]*$ ]] ;;
     *) return 1 ;;
   esac

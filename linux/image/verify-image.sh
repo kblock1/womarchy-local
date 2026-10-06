@@ -162,6 +162,14 @@ else
   renderer=$(bash -lc 'eglinfo -B -p surfaceless 2>&1' | grep -m1 'OpenGL core profile renderer' | sed 's/.*renderer: //')
   [[ $renderer == D3D12* ]] && pass "eglinfo surfaceless (login env GALLIUM_DRIVER=$gd): $renderer" ||
     fail "eglinfo surfaceless renderer: ${renderer:-none} (GALLIUM_DRIVER=$gd)"
+  # the configured adapter is the one rendering, in login shells and in the user manager
+  want=$(sed -n 's/^WOMARCHY_GPU_ADAPTER=//p' /etc/womarchy/config 2>/dev/null | tail -n1)
+  if [[ -n $want && -e /dev/dxg ]]; then
+    [[ ${renderer,,} == *"${want,,}"* ]] && pass "d3d12 adapter is WOMARCHY_GPU_ADAPTER=$want" ||
+      fail "d3d12 adapter: $renderer, not WOMARCHY_GPU_ADAPTER=$want"
+    grep -qx "MESA_D3D12_DEFAULT_ADAPTER_NAME=$want" <<<"$ume" && pass "user manager env: MESA_D3D12_DEFAULT_ADAPTER_NAME=$want" ||
+      fail "user manager env lacks MESA_D3D12_DEFAULT_ADAPTER_NAME=$want"
+  fi
 
   # Audio: straight to WSLg, and through PipeWire's tunnel.
   srv=$(PULSE_SERVER=unix:/mnt/wslg/PulseServer pactl info 2>/dev/null | sed -n 's/^Server Name: //p')

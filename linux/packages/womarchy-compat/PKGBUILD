@@ -18,7 +18,7 @@
 
 pkgname=womarchy-compat
 pkgver=0.4.1
-pkgrel=1
+pkgrel=2
 pkgdesc='Omarchy on WSL: bootloader/snapshot stand-ins and the womarchy WSL overlay'
 arch=(any)
 url='https://github.com/sytelus/womarchy'

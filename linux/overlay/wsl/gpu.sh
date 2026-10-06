@@ -8,7 +8,8 @@
 #  - user manager: /usr/lib/systemd/user-environment-generators/60-womarchy-gpu
 #    (shipped by womarchy-compat);
 #  - login shells: /etc/profile.d/womarchy-gpu.sh (written here).
-# MESA_D3D12_DEFAULT_ADAPTER_NAME is deliberately left unset (first adapter).
+# MESA_D3D12_DEFAULT_ADAPTER_NAME comes from WOMARCHY_GPU_ADAPTER in /etc/womarchy/config
+# (empty: Mesa's own choice, which on a PC with an integrated GPU and a discrete card can be the iGPU).
 set -euo pipefail
 
 # Earlier images set it unconditionally through environment.d.
@@ -23,6 +24,12 @@ cat >/etc/profile.d/womarchy-gpu.sh <<'CONF'
 # Mesa's d3d12 driver only when WSL exposes the host GPU (it does not fall back).
 if [ -z "${GALLIUM_DRIVER+x}" ] && [ -e /dev/dxg ]; then
   export GALLIUM_DRIVER=d3d12
+fi
+# WOMARCHY_GPU_ADAPTER (/etc/womarchy/config): the d3d12 adapter, by part of its name.
+if [ -z "${MESA_D3D12_DEFAULT_ADAPTER_NAME+x}" ] && [ -e /dev/dxg ]; then
+  _womarchy_adapter=$(sed -n 's/^WOMARCHY_GPU_ADAPTER=//p' /etc/womarchy/config 2>/dev/null | tail -n1)
+  case $_womarchy_adapter in ''|*[!A-Za-z0-9._-]*) ;; *) export MESA_D3D12_DEFAULT_ADAPTER_NAME=$_womarchy_adapter ;; esac
+  unset _womarchy_adapter
 fi
 export GSK_RENDERER="${GSK_RENDERER:-ngl}"
 CONF
