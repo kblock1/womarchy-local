@@ -18,6 +18,7 @@ pub fn to_evdev(scancode: u32, extended: bool, vk: u32) -> Option<u32> {
             0x1C => 96,  // KEY_KPENTER
             0x1D => 97,  // KEY_RIGHTCTRL
             0x35 => 98,  // KEY_KPSLASH
+            0x36 => 54,  // KEY_RIGHTSHIFT (the low-level hook flags right Shift as extended)
             0x37 => 99,  // KEY_SYSRQ
             0x38 => 100, // KEY_RIGHTALT
             0x47 => 102, // KEY_HOME
@@ -91,3 +92,16 @@ pub const BTN_RIGHT: u32 = 0x111;
 pub const BTN_MIDDLE: u32 = 0x112;
 pub const BTN_SIDE: u32 = 0x113;
 pub const BTN_EXTRA: u32 = 0x114;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shifts_map_with_or_without_the_extended_flag() {
+        assert_eq!(to_evdev(0x2A, false, 0xA0), Some(42)); // left Shift
+        assert_eq!(to_evdev(0x36, true, 0xA1), Some(54)); // right Shift, as the low-level hook reports it
+        assert_eq!(to_evdev(0x36, false, 0xA1), Some(54));
+        assert_eq!(to_evdev(0x2A, true, 0xA0), None); // E0 2A is never a real key
+    }
+}

@@ -346,8 +346,10 @@ unsafe extern "system" fn ll_keyboard(code: i32, wparam: WPARAM, lparam: LPARAM)
     if code == HC_ACTION as i32 && LIVE.load(Ordering::SeqCst) && is_ours(GetForegroundWindow()) {
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
-        // AltGr on some layouts fires a synthetic LCtrl with scancode 0x21D; leave it to Windows
-        if kb.scanCode != 0x21D {
+        // Windows' synthetic modifiers carry bit 0x200 in the scancode: the LCtrl AltGr fires on some
+        // layouts (0x21D) and the fake Shifts around navigation keys with Num Lock on (0x22A/0x236,
+        // which would otherwise read as right Shift). Leave them to Windows.
+        if kb.scanCode & 0x200 == 0 {
             let extended = kb.flags.0 & LLKHF_EXTENDED.0 != 0;
 
             // Escape hatch that never reaches Linux: Ctrl+Alt+End minimises the desktop.
