@@ -487,17 +487,22 @@ pub fn status(name: &str) -> i32 {
         Some(v) => println!("WSL:          {}.{}.{}{}", v[0], v[1], v[2], if v < MIN_WSL { "  (too old: wsl --update)" } else { "" }),
         None => println!("WSL:          not installed"),
     }
-    for m in crate::monitors::enumerate() {
+    let omarchy_main = crate::monitors::enumerate().first().map(|m| m.name.clone());
+    for s in crate::monitors::survey() {
+        let m = &s.monitor;
         println!(
-            "Monitor {}:    {}x{} at {},{}  {} Hz  scale {}%{}",
-            m.id,
+            "Monitor:      {:<8} {}x{} at {},{}  {} Hz  scale {}%{}{}{}  {}",
+            m.name,
             m.width,
             m.height,
             m.x,
             m.y,
             m.refresh_mhz / 1000,
             m.scale_1000 / 10,
-            if m.primary { "  (primary)" } else { "" }
+            if m.primary { "  (primary)" } else { "" },
+            if omarchy_main.as_ref() == Some(&m.name) { "  [Omarchy main]" } else { "" },
+            if s.skipped { "  [Windows only: OMARCHY_SKIP_MONITORS]" } else { "" },
+            s.device
         );
     }
     if !distro_exists(name) {

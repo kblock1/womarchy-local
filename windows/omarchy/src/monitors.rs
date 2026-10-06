@@ -6,11 +6,95 @@ use windows::Win32::Foundation::{LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
+/// A Windows monitor as found, before OMARCHY_SKIP_MONITORS is applied.
+pub struct Seen {
+    pub monitor: Monitor,
+    /// The monitor's device interface path (e.g. `\\?\DISPLAY#ABC1234#5&1a2b3c4&0&UID4100#{...}`):
+    /// stable across reboots for the same monitor on the same port, unlike DISPLAYn.
+    pub device: String,
+    pub skipped: bool,
+}
+
+/// The monitors Omarchy gets: every Windows monitor except those OMARCHY_SKIP_MONITORS leaves to
+/// Windows. Ids are 1..n over the monitors kept, Omarchy's main monitor first (see `omarchy_order`).
 pub fn enumerate() -> Vec<Monitor> {
+    omarchy_order(survey(), &rules("OMARCHY_MAIN_MONITOR"))
+}
+
+/// The kept monitors in Omarchy's order, numbered 1..n: the first becomes WSL-1, the main Hyprland
+/// output (workspace 1). That is the monitor OMARCHY_MAIN_MONITOR names, or else Windows' primary
+/// (which `survey` already sorts first); `primary` is set on it alone.
+fn omarchy_order(seen: Vec<Seen>, main: &[String]) -> Vec<Monitor> {
+    let mut kept: Vec<Seen> = seen.into_iter().filter(|s| !s.skipped).collect();
+    if let Some(i) = kept.iter().position(|s| matches(main, &s.monitor.name, &s.device)) {
+        let chosen = kept.remove(i);
+        kept.insert(0, chosen);
+        for (j, s) in kept.iter_mut().enumerate() {
+            s.monitor.primary = j == 0;
+        }
+    }
+    let mut out: Vec<Monitor> = kept.into_iter().map(|s| s.monitor).collect();
+    for (i, m) in out.iter_mut().enumerate() {
+        m.id = (i + 1) as u32;
+    }
+    out
+}
+
+/// A monitor list from the environment: OMARCHY_SKIP_MONITORS (monitors left to Windows) or
+/// OMARCHY_MAIN_MONITOR (Omarchy's main monitor), separated by commas, semicolons or spaces. Each
+/// entry is a Windows display name (`DISPLAY4`, exact) or part of a monitor's device path (`UID4100`,
+/// or a model code such as `ABC1234`), case-insensitive. `omarchy status` lists both for every monitor.
+fn rules(var: &str) -> Vec<String> {
+    std::env::var(var)
+        .unwrap_or_default()
+        .split([',', ';', ' '])
+        .map(|r| r.trim().trim_start_matches("\\\\.\\").to_ascii_uppercase())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+fn matches(rules: &[String], name: &str, device: &str) -> bool {
+    let (name, device) = (name.to_ascii_uppercase(), device.to_ascii_uppercase());
+    rules.iter().any(|r| *r == name || (!device.is_empty() && device.contains(r.as_str())))
+}
+
+/// Every Windows monitor, marked with whether OMARCHY_SKIP_MONITORS leaves it to Windows. If the rules
+/// would leave Omarchy no monitor at all, they are ignored (with a warning).
+pub fn survey() -> Vec<Seen> {
+    let rules = rules("OMARCHY_SKIP_MONITORS");
+    let mut seen: Vec<Seen> = enumerate_all()
+        .into_iter()
+        .map(|(monitor, device)| {
+            let skipped = matches(&rules, &monitor.name, &device);
+            Seen { monitor, device, skipped }
+        })
+        .collect();
+    if !seen.is_empty() && seen.iter().all(|s| s.skipped) {
+        eprintln!("[omarchy] OMARCHY_SKIP_MONITORS matches every monitor; ignoring it");
+        for s in seen.iter_mut() {
+            s.skipped = false;
+        }
+    }
+    seen
+}
+
+/// The monitor's device interface path, or "" when Windows doesn't report one.
+fn device_path(gdi_name: &[u16]) -> String {
+    let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+    // flag 1 = EDD_GET_DEVICE_INTERFACE_NAME: DeviceID becomes the monitor's interface path
+    if unsafe { EnumDisplayDevicesW(windows::core::PCWSTR(gdi_name.as_ptr()), 0, &mut dd, 1) }.as_bool() {
+        String::from_utf16_lossy(&dd.DeviceID).trim_end_matches('\0').to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn enumerate_all() -> Vec<(Monitor, String)> {
     // testing: a layout read from a file (re-read on every call), so full-screen mode and display
     // changes can be exercised with small fake "monitors" without touching the real display settings
     if let Some(path) = std::env::var_os("OMARCHY_FAKE_MONITORS_FILE") {
-        return std::fs::read_to_string(path).map(|s| parse_env(s.trim())).unwrap_or_default();
+        let mons = std::fs::read_to_string(path).map(|s| parse_env(s.trim())).unwrap_or_default();
+        return mons.into_iter().map(|m| (m, String::new())).collect();
     }
     let mut handles: Vec<HMONITOR> = Vec::new();
     unsafe extern "system" fn cb(h: HMONITOR, _: HDC, _: *mut RECT, lp: LPARAM) -> BOOL {
@@ -42,24 +126,25 @@ pub fn enumerate() -> Vec<Monitor> {
                 60
             };
             let name = String::from_utf16_lossy(&info.szDevice).trim_end_matches('\0').trim_start_matches("\\\\.\\").to_string();
-            out.push(Monitor {
-                id: (i + 1) as u32,
-                x: r.left,
-                y: r.top,
-                width: (r.right - r.left) as u32,
-                height: (r.bottom - r.top) as u32,
-                refresh_mhz: hz * 1000,
-                scale_1000: dx * 1000 / 96,
-                primary: info.monitorInfo.dwFlags & 1 != 0, // MONITORINFOF_PRIMARY
-                name,
-            });
+            let device = device_path(&info.szDevice);
+            out.push((
+                Monitor {
+                    id: (i + 1) as u32,
+                    x: r.left,
+                    y: r.top,
+                    width: (r.right - r.left) as u32,
+                    height: (r.bottom - r.top) as u32,
+                    refresh_mhz: hz * 1000,
+                    scale_1000: dx * 1000 / 96,
+                    primary: info.monitorInfo.dwFlags & 1 != 0, // MONITORINFOF_PRIMARY
+                    name,
+                },
+                device,
+            ));
         }
     }
     // primary first, so it becomes WSL-1 / the main Hyprland output (ids are stable after this: keep_ids)
-    out.sort_by_key(|m| (!m.primary, m.x, m.y));
-    for (i, m) in out.iter_mut().enumerate() {
-        m.id = (i + 1) as u32;
-    }
+    out.sort_by_key(|(m, _)| (!m.primary, m.x, m.y));
     out
 }
 
@@ -131,6 +216,49 @@ mod tests {
         assert_eq!(ids[2], ("DISPLAY1".into(), 1));
         // the new monitor gets an id nobody had: not DISPLAY2's 2, which may still be on its way out
         assert_eq!(ids[1].1, 4);
+    }
+
+    #[test]
+    fn skip_rules_match_display_names_exactly_and_device_paths_in_part() {
+        let rules = vec!["DISPLAY4".to_string(), "XYZ0001".to_string()];
+        let side_panel = r"\\?\DISPLAY#XYZ0001#5&2b3c4d5&0&UID512#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        let wide = r"\\?\display#abc1234#5&1a2b3c4&0&uid4100#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        assert!(matches(&rules, "DISPLAY4", wide));
+        assert!(matches(&rules, "display4", ""));
+        assert!(!matches(&rules, "DISPLAY40", ""));
+        assert!(matches(&rules, "DISPLAY5", side_panel));
+        assert!(!matches(&rules, "DISPLAY3", wide));
+        assert!(matches(&["UID4100".to_string()], "DISPLAY9", wide));
+        assert!(!matches(&[], "DISPLAY4", wide));
+    }
+
+    #[test]
+    fn main_monitor_goes_first_and_alone_is_primary() {
+        // Windows keeps its primary (DISPLAY3) and a small side panel (DISPLAY5); Omarchy's main is DISPLAY4
+        let seen = |name: &str, uid: &str, x: i32, primary: bool, skipped: bool| Seen {
+            monitor: Monitor { primary, ..mon(0, name, x) },
+            device: format!(r"\\?\DISPLAY#ABC1234#5&1a2b3c4&0&{uid}#{{e6f07b5f}}"),
+            skipped,
+        };
+        let layout = || {
+            vec![
+                seen("DISPLAY3", "UID4100", 0, true, true),
+                seen("DISPLAY2", "UID4101", -1440, false, false),
+                seen("DISPLAY4", "UID4102", 0, false, false),
+                seen("DISPLAY5", "UID512", 2560, false, true),
+                seen("DISPLAY1", "UID4103", 3840, false, false),
+            ]
+        };
+        let order = |mons: Vec<Monitor>| mons.iter().map(|m| (m.id, m.name.clone(), m.primary)).collect::<Vec<_>>();
+        assert_eq!(
+            order(omarchy_order(layout(), &["UID4102".to_string()])),
+            vec![(1, "DISPLAY4".into(), true), (2, "DISPLAY2".into(), false), (3, "DISPLAY1".into(), false)]
+        );
+        // no (or no matching) OMARCHY_MAIN_MONITOR: the survey's order stands
+        assert_eq!(
+            order(omarchy_order(layout(), &[])),
+            vec![(1, "DISPLAY2".into(), false), (2, "DISPLAY4".into(), false), (3, "DISPLAY1".into(), false)]
+        );
     }
 
     #[test]

@@ -80,6 +80,9 @@ fn usage() -> ! {
     println!("development: --windowed WxH [--monitors N] [--scale S], --session PATH, --port N, --stats,");
     println!("             --dump-frame FILE [--dump-after FRAMES], --input-script FILE [--shot-dir DIR]");
     println!("Ctrl+Alt+End minimises the desktop. OMARCHY_DISTRO sets the default distro name (Omarchy).");
+    println!("OMARCHY_SKIP_MONITORS leaves monitors to Windows: DISPLAYn names or parts of their device paths");
+    println!("(e.g. DISPLAY4,UID4100), separated by commas; `omarchy status` lists both for each monitor.");
+    println!("OMARCHY_MAIN_MONITOR picks Omarchy's main monitor (workspace 1) the same way; default: Windows' primary.");
     println!("omarchy --version prints this program's version.");
     std::process::exit(0)
 }
