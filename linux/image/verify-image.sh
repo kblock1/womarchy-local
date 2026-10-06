@@ -76,7 +76,13 @@ if (( EUID == 0 )); then
     s=$(systemctl is-enabled "$u.service" 2>/dev/null)
     [[ $s == masked || -z $s || $s == not-found ]] && pass "$u: ${s:-absent}" || fail "$u: $s"
   done
-  check "docker.socket enabled" systemctl is-enabled docker.socket
+  if [[ $(sed -n 's/^WOMARCHY_DOCKER=//p' /etc/womarchy/config | tail -n1) == 0 ]]; then
+    s=$(systemctl is-enabled docker.socket 2>/dev/null)
+    [[ $s != enabled ]] && pass "docker.socket ${s:-absent} (WOMARCHY_DOCKER=0: Docker Desktop's WSL integration)" ||
+      fail "docker.socket enabled although WOMARCHY_DOCKER=0"
+  else
+    check "docker.socket enabled" systemctl is-enabled docker.socket
+  fi
   jq -e 'has("dns") | not' /etc/docker/daemon.json >/dev/null 2>&1 && pass "docker daemon.json has no dns key" || fail "docker daemon.json dns"
   check "binfmt drop-in" test -f /etc/systemd/system/systemd-binfmt.service.d/10-womarchy-wsl.conf
   # other distros' disks and loop devices (Docker Desktop's ISOs) are hidden from udisks,
