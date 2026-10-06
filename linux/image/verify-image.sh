@@ -79,6 +79,18 @@ if (( EUID == 0 )); then
   check "docker.socket enabled" systemctl is-enabled docker.socket
   jq -e 'has("dns") | not' /etc/docker/daemon.json >/dev/null 2>&1 && pass "docker daemon.json has no dns key" || fail "docker daemon.json dns"
   check "binfmt drop-in" test -f /etc/systemd/system/systemd-binfmt.service.d/10-womarchy-wsl.conf
+  # other distros' disks and loop devices (Docker Desktop's ISOs) are hidden from udisks,
+  # so Omarchy's udiskie never prompts to automount them
+  check "udev rule hiding WSL disks from udisks" test -f /usr/lib/udev/rules.d/90-womarchy-wsl-disks.rules
+  shown=()
+  for d in /sys/class/block/loop* /sys/class/block/sd?; do
+    [[ -e $d ]] || continue
+    props=$(udevadm info -q property -n "/dev/${d##*/}" 2>/dev/null)
+    [[ ${d##*/} == loop* ]] || grep -qx ID_VENDOR=Msft <<<"$props" || continue
+    grep -qx UDISKS_IGNORE=1 <<<"$props" || shown+=("${d##*/}")
+  done
+  ((${#shown[@]} == 0)) && pass "WSL loop devices and virtual disks hidden from udisks" ||
+    fail "visible to udisks (udiskie would prompt to mount them): ${shown[*]}"
   if pacman -Qq womarchy-session &>/dev/null; then
     mountpoint -q /mnt/wslgshm && pass "mnt-wslgshm.mount mounted" || fail "mnt-wslgshm.mount: $(systemctl is-active mnt-wslgshm.mount)"
   else

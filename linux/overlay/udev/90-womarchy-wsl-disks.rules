@@ -1,0 +1,7 @@
+# womarchy: the WSL VM's block devices are not this desktop's drives.
+# Every WSL distro sees the same loop devices (e.g. Docker Desktop's docker-desktop.iso) and
+# Hyper-V virtual disks (every distro's root filesystem, swap, WSLg's system distro). Without
+# this, Omarchy's udiskie tries to automount them (a polkit password prompt at every login, for
+# another distro's disk) and Nautilus lists them. UDISKS_IGNORE hides them from udisks clients.
+SUBSYSTEM=="block", KERNEL=="loop*", ENV{UDISKS_IGNORE}="1"
+SUBSYSTEM=="block", ENV{ID_VENDOR}=="Msft", ENV{ID_MODEL}=="Virtual_Disk", ENV{UDISKS_IGNORE}="1"

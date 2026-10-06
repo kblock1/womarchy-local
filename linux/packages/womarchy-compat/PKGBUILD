@@ -51,6 +51,8 @@ package() {
   install -Dm755 "$o/bin/nm-online" "$pkgdir/usr/lib/womarchy/bin/nm-online"
   # GALLIUM_DRIVER=d3d12 for the user manager only when /dev/dxg exists
   install -Dm755 "$o/systemd/60-womarchy-gpu" "$pkgdir/usr/lib/systemd/user-environment-generators/60-womarchy-gpu"
+  # hide the WSL VM's loop devices and virtual disks from udisks (udiskie automount prompts)
+  install -Dm644 "$o/udev/90-womarchy-wsl-disks.rules" "$pkgdir/usr/lib/udev/rules.d/90-womarchy-wsl-disks.rules"
 
   install -d "$pkgdir/usr/lib/womarchy/wsl"
   install -m644 "$o"/wsl/*.sh "$pkgdir/usr/lib/womarchy/wsl/"
